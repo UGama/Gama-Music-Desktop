@@ -1,0 +1,24 @@
+# Personal music data
+media/
+data/
+
+# Node
+node_modules/
+
+dist/
+release/
+*.dmg
+
+# macOS
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+vendor/
