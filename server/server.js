@@ -11,7 +11,6 @@ const { execFile, spawn } = require('node:child_process');
 const { URL } = require('node:url');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
-const WEB_DIR = path.join(ROOT_DIR, 'web');
 
 const STORAGE_DIR =
   process.env.GAMA_MUSIC_STORAGE_DIR ||
@@ -92,23 +91,10 @@ function publicTrack(track) {
   };
 }
 
-function publicPlaylist(playlist) {
-  return {
-    id: playlist.id,
-    name: playlist.name,
-    trackIds: playlist.trackIds,
-    sourceKey: playlist.sourceKey || null,
-    source: playlist.source || null,
-    createdAt: playlist.createdAt,
-    updatedAt: playlist.updatedAt
-  };
-}
-
 function publicLibrary(library) {
   return {
     version: library.version,
     tracks: library.tracks.map(publicTrack),
-    playlists: library.playlists.map(publicPlaylist),
     updatedAt: library.updatedAt
   };
 }
@@ -785,85 +771,6 @@ function extractBilibiliFavoriteIdentity(rawUrl) {
   };
 }
 
-function findImportedFavoritePlaylist(library, favoriteSource) {
-  return library.playlists.find((playlist) => {
-    return (
-      playlist.sourceKey === favoriteSource.key ||
-      playlist.source?.key === favoriteSource.key
-    );
-  }) || null;
-}
-
-function ensureFavoritePlaylist(playlistUrl, playlistTitle) {
-  const favoriteSource = extractBilibiliFavoriteIdentity(playlistUrl);
-  const library = readLibrary();
-
-  let playlist = findImportedFavoritePlaylist(library, favoriteSource);
-
-  if (playlist) {
-    return {
-      playlist,
-      alreadyImported: true,
-      favoriteSource
-    };
-  }
-
-  playlist = {
-    id: makeId('pl'),
-    name: cleanTitle(playlistTitle, 'B站收藏夹'),
-    trackIds: [],
-    sourceKey: favoriteSource.key,
-    source: favoriteSource,
-    createdAt: nowIso(),
-    updatedAt: nowIso()
-  };
-
-  library.playlists.unshift(playlist);
-  writeLibrary(library);
-
-  return {
-    playlist,
-    alreadyImported: false,
-    favoriteSource
-  };
-}
-
-function addTrackToPlaylist(playlistId, trackId) {
-  const library = readLibrary();
-
-  const playlist = library.playlists.find(
-    (item) => item.id === playlistId
-  );
-
-  if (!playlist) {
-    throw new Error('没有找到收藏夹对应的播放列表');
-  }
-
-  const track = library.tracks.find(
-    (item) => item.id === trackId
-  );
-
-  if (!track) {
-    throw new Error('准备加入播放列表的歌曲不存在');
-  }
-
-  if (playlist.trackIds.includes(trackId)) {
-    return {
-      added: false,
-      playlist: publicPlaylist(playlist)
-    };
-  }
-
-  playlist.trackIds.push(trackId);
-  playlist.updatedAt = nowIso();
-
-  writeLibrary(library);
-
-  return {
-    added: true,
-    playlist: publicPlaylist(playlist)
-  };
-}
 
 function buildFavoritesImportPreview(result) {
   const library = readLibrary();
@@ -1193,43 +1100,100 @@ function publicFavoriteJob(job) {
     status: job.status,
     stage: job.stage,
 
-    playlistId: job.playlistId,
-    playlistName: job.playlistName,
-    alreadyImported: Boolean(job.alreadyImported),
+    playlistName:
+      job.playlistName,
 
-    total: job.total,
-    processed: job.processed,
+    favoriteKey:
+      job.favoriteKey || null,
 
-    downloaded: job.downloaded,
-    duplicates: job.duplicates,
+    trackIds:
+      Array.isArray(job.trackIds)
+        ? job.trackIds
+        : [],
 
-    addedToPlaylist: job.addedToPlaylist,
-    alreadyInPlaylist: job.alreadyInPlaylist,
+    total:
+      job.total,
 
-    failed: job.failed,
+    processed:
+      job.processed,
 
-    currentIndex: job.currentIndex,
-    currentVideo: job.currentVideo,
+    downloaded:
+      job.downloaded,
 
-    progress: job.total
-      ? Math.round((job.processed / job.total) * 100)
-      : 0,
+    duplicates:
+      job.duplicates,
 
-    failures: job.failures,
-    error: job.error || null,
+    failed:
+      job.failed,
 
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt
+    currentIndex:
+      job.currentIndex,
+
+    currentVideo:
+      job.currentVideo,
+
+    progress:
+      job.total
+        ? Math.round(
+          (job.processed / job.total) *
+          100
+        )
+        : 0,
+
+    failures:
+      job.failures,
+
+    error:
+      job.error || null,
+
+    createdAt:
+      job.createdAt,
+
+    updatedAt:
+      job.updatedAt
   };
+}
+
+function addFavoriteJobTrack(
+  job,
+  trackId
+) {
+
+  if (!trackId) {
+    return;
+  }
+
+
+  if (
+    !Array.isArray(
+      job.trackIds
+    )
+  ) {
+
+    job.trackIds = [];
+
+  }
+
+
+  if (
+    !job.trackIds.includes(
+      trackId
+    )
+  ) {
+
+    job.trackIds.push(
+      trackId
+    );
+
+  }
+
 }
 
 
 async function runFavoriteImportJob(job, videos) {
   try {
     job.status = 'running';
-    job.stage = job.alreadyImported
-      ? '正在同步已有播放列表'
-      : '正在导入收藏夹';
+    job.stage = '正在导入收藏夹';
 
     job.updatedAt = nowIso();
 
@@ -1288,19 +1252,10 @@ async function runFavoriteImportJob(job, videos) {
           }
         }
 
-
-        const result =
-          addTrackToPlaylist(
-            job.playlistId,
-            duplicate.id
-          );
-
-
-        if (result.added) {
-          job.addedToPlaylist += 1;
-        } else {
-          job.alreadyInPlaylist += 1;
-        }
+        addFavoriteJobTrack(
+          job,
+          duplicate.id
+        );
 
 
         job.processed += 1;
@@ -1329,34 +1284,32 @@ async function runFavoriteImportJob(job, videos) {
         childJob.status === 'complete' &&
         childJob.track
       ) {
+
         job.downloaded += 1;
 
-        const result = addTrackToPlaylist(
-          job.playlistId,
+
+        addFavoriteJobTrack(
+          job,
           childJob.track.id
         );
 
-        if (result.added) {
-          job.addedToPlaylist += 1;
-        } else {
-          job.alreadyInPlaylist += 1;
-        }
+
+
       } else if (
         childJob.status === 'duplicate' &&
         childJob.existingTrack
       ) {
+
         job.duplicates += 1;
 
-        const result = addTrackToPlaylist(
-          job.playlistId,
+
+        addFavoriteJobTrack(
+          job,
           childJob.existingTrack.id
         );
 
-        if (result.added) {
-          job.addedToPlaylist += 1;
-        } else {
-          job.alreadyInPlaylist += 1;
-        }
+
+
       } else {
         job.failed += 1;
 
@@ -1488,50 +1441,62 @@ async function handleApi(req, res, url) {
     const rawResult =
       await execYtDlpPlaylistJson(playlistUrl);
 
-    const playlistResult =
-      ensureFavoritePlaylist(
-        playlistUrl,
-        rawResult.title
+    const favoriteSource =
+      extractBilibiliFavoriteIdentity(
+        playlistUrl
       );
 
-    const playlist =
-      playlistResult.playlist;
-
     const job = {
-      id: makeId('fav'),
+      id:
+        makeId('fav'),
 
-      status: 'queued',
+      status:
+        'queued',
 
       stage:
-        playlistResult.alreadyImported
-          ? '准备同步收藏夹'
-          : '准备导入收藏夹',
+        '准备导入收藏夹',
 
-      playlistId: playlist.id,
-      playlistName: playlist.name,
+      playlistName:
+        cleanTitle(
+          rawResult.title,
+          'B站收藏夹'
+        ),
 
-      alreadyImported:
-        playlistResult.alreadyImported,
+      favoriteKey:
+        favoriteSource.key,
 
-      total: rawResult.videos.length,
+      trackIds:
+        [],
 
-      processed: 0,
+      total:
+        rawResult.videos.length,
 
-      downloaded: 0,
-      duplicates: 0,
+      processed:
+        0,
 
-      addedToPlaylist: 0,
-      alreadyInPlaylist: 0,
+      downloaded:
+        0,
 
-      failed: 0,
+      duplicates:
+        0,
 
-      currentIndex: 0,
-      currentVideo: null,
+      failed:
+        0,
 
-      failures: [],
+      currentIndex:
+        0,
 
-      createdAt: nowIso(),
-      updatedAt: nowIso()
+      currentVideo:
+        null,
+
+      failures:
+        [],
+
+      createdAt:
+        nowIso(),
+
+      updatedAt:
+        nowIso()
     };
 
     favoriteJobs.set(job.id, job);
@@ -1633,11 +1598,12 @@ async function handleApi(req, res, url) {
         sendJson(res, 404, { error: '没有找到这首歌' });
         return;
       }
-      const [track] = library.tracks.splice(trackIndex, 1);
-      for (const playlist of library.playlists) {
-        playlist.trackIds = playlist.trackIds.filter((id) => id !== trackId);
-        playlist.updatedAt = nowIso();
-      }
+      const [track] =
+        library.tracks.splice(
+          trackIndex,
+          1
+        );
+
       writeLibrary(library);
       if (track.file) {
         fs.rmSync(path.join(MEDIA_DIR, track.file), { force: true });
@@ -1652,91 +1618,6 @@ async function handleApi(req, res, url) {
         );
       }
       sendJson(res, 200, { ok: true });
-      return;
-    }
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/playlists') {
-    const body = await readJsonBody(req);
-    const name = cleanTitle(body.name || '', '新播放列表');
-    const library = readLibrary();
-    const playlist = {
-      id: makeId('pl'),
-      name,
-      trackIds: [],
-      createdAt: nowIso(),
-      updatedAt: nowIso()
-    };
-    library.playlists.unshift(playlist);
-    writeLibrary(library);
-    sendJson(res, 201, { playlist: publicPlaylist(playlist) });
-    return;
-  }
-
-  const playlistMatch = url.pathname.match(/^\/api\/playlists\/([^/]+)$/);
-  if (playlistMatch) {
-    const playlistId = decodeURIComponent(playlistMatch[1]);
-    if (req.method === 'PATCH') {
-      const body = await readJsonBody(req);
-      const name = cleanTitle(body.name || '');
-      if (!name) throw new Error('播放列表名称不能为空');
-      const library = readLibrary();
-      const playlist = library.playlists.find((item) => item.id === playlistId);
-      if (!playlist) {
-        sendJson(res, 404, { error: '没有找到这个播放列表' });
-        return;
-      }
-      playlist.name = name;
-      playlist.updatedAt = nowIso();
-      writeLibrary(library);
-      sendJson(res, 200, { playlist: publicPlaylist(playlist) });
-      return;
-    }
-
-    if (req.method === 'DELETE') {
-      const library = readLibrary();
-      const nextPlaylists = library.playlists.filter((item) => item.id !== playlistId);
-      if (nextPlaylists.length === library.playlists.length) {
-        sendJson(res, 404, { error: '没有找到这个播放列表' });
-        return;
-      }
-      library.playlists = nextPlaylists;
-      writeLibrary(library);
-      sendJson(res, 200, { ok: true });
-      return;
-    }
-  }
-
-  const playlistTrackMatch = url.pathname.match(/^\/api\/playlists\/([^/]+)\/tracks(?:\/([^/]+))?$/);
-  if (playlistTrackMatch) {
-    const playlistId = decodeURIComponent(playlistTrackMatch[1]);
-    const trackIdFromPath = playlistTrackMatch[2] ? decodeURIComponent(playlistTrackMatch[2]) : null;
-    const library = readLibrary();
-    const playlist = library.playlists.find((item) => item.id === playlistId);
-    if (!playlist) {
-      sendJson(res, 404, { error: '没有找到这个播放列表' });
-      return;
-    }
-
-    if (req.method === 'POST') {
-      const body = await readJsonBody(req);
-      const trackId = String(body.trackId || '').trim();
-      const track = library.tracks.find((item) => item.id === trackId);
-      if (!track) throw new Error('没有找到这首歌');
-      if (!playlist.trackIds.includes(trackId)) {
-        playlist.trackIds.push(trackId);
-        playlist.updatedAt = nowIso();
-        writeLibrary(library);
-      }
-      sendJson(res, 200, { playlist: publicPlaylist(playlist) });
-      return;
-    }
-
-    if (req.method === 'DELETE' && trackIdFromPath) {
-      playlist.trackIds = playlist.trackIds.filter((trackId) => trackId !== trackIdFromPath);
-      playlist.updatedAt = nowIso();
-      writeLibrary(library);
-      sendJson(res, 200, { playlist: publicPlaylist(playlist) });
       return;
     }
   }
@@ -1848,20 +1729,6 @@ function serveMedia(req, res, url) {
   serveFile(req, res, filePath);
 }
 
-function serveWeb(req, res, url) {
-  let requestPath = safeDecodeURIComponent(url.pathname);
-  if (requestPath === '/') requestPath = '/index.html';
-  const filePath = safeJoin(WEB_DIR, requestPath);
-  if (!filePath) {
-    res.statusCode = 400;
-    res.end('Bad path');
-    return;
-  }
-  if (path.basename(filePath) === 'service-worker.js') {
-    res.setHeader('Service-Worker-Allowed', '/');
-  }
-  serveFile(req, res, filePath);
-}
 
 async function handleRequest(req, res) {
   const url = new URL(req.url, `${activeProtocol}://localhost:${PORT}`);
@@ -1876,7 +1743,26 @@ async function handleRequest(req, res) {
       return;
     }
 
-    serveWeb(req, res, url);
+
+    /*
+     * Server 根地址只用于确认服务状态。
+     * 播放器已经完全移动到 Gama Music Web。
+     */
+    if (url.pathname === '/') {
+      sendJson(res, 200, {
+        ok: true,
+        name: 'Gama Music Server',
+        webApp:
+          'https://ugama.github.io/Gama-Music-Web/'
+      });
+
+      return;
+    }
+
+
+    sendJson(res, 404, {
+      error: '没有找到这个地址'
+    });
   } catch (error) {
     sendJson(res, 400, { error: error.message });
   }
@@ -1916,7 +1802,7 @@ const server = createServer();
 server.listen(PORT, HOST, () => {
   console.log('Gama Music is running.');
   console.log('');
-  console.log('Open one of these addresses on your iPhone while it is on the same Wi-Fi:');
+  console.log('Gama Music Server addresses:');
   for (const address of localUrls()) {
     console.log(`  ${address}`);
   }

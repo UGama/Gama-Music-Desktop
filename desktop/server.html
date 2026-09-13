@@ -1,0 +1,175 @@
+<!doctype html>
+
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>
+        Gama Music Server
+    </title>
+
+    <link rel="stylesheet" href="./server.css">
+</head>
+
+
+<body>
+
+    <main class="app">
+
+        <header class="hero">
+
+            <div class="logo">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+
+            <div>
+
+                <h1>
+                    Gama Music Server
+                </h1>
+
+                <p>
+                    Mac 音乐下载与文件服务
+                </p>
+
+            </div>
+
+        </header>
+
+
+        <section class="status-card">
+
+            <div class="status-line">
+
+                <span id="serverDot" class="status-dot"></span>
+
+                <div>
+
+                    <strong id="serverStatus">
+                        正在启动服务……
+                    </strong>
+
+                    <div id="songCount" class="muted">
+                        正在读取音乐库
+                    </div>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <section class="card">
+
+            <div class="card-heading">
+                Gama Music Web
+            </div>
+
+            <p class="muted">
+                播放器、播放列表和离线音乐都在 Web 版管理。
+            </p>
+
+            <button id="openWebButton" class="primary-button">
+                打开 Gama Music Web
+            </button>
+
+        </section>
+
+
+        <section class="card">
+
+            <div class="card-heading">
+                Server
+            </div>
+
+            <div class="info-row">
+                <span>本机</span>
+
+                <code id="localUrl">
+          —
+        </code>
+            </div>
+
+            <div class="info-row">
+                <span>局域网</span>
+
+                <code id="lanUrl">
+          —
+        </code>
+            </div>
+
+        </section>
+
+
+        <section class="card">
+
+            <div class="card-heading">
+                Bilibili 下载服务
+            </div>
+
+            <div class="tool-row">
+
+                <span>
+                    yt-dlp
+                </span>
+
+                <strong id="ytdlpStatus">
+                    检查中
+                </strong>
+
+            </div>
+
+
+            <div class="tool-row">
+
+                <span>
+                    ffmpeg
+                </span>
+
+                <strong id="ffmpegStatus">
+                    检查中
+                </strong>
+
+            </div>
+
+        </section>
+
+
+        <section class="card">
+
+            <div class="card-heading">
+                数据位置
+            </div>
+
+            <code id="dataDir" class="data-path">
+        —
+      </code>
+
+            <button id="openDataButton" class="secondary-button">
+                在 Finder 中打开
+            </button>
+
+        </section>
+
+
+        <footer>
+
+            关闭窗口后 Server 仍会运行。
+            使用 ⌘Q 完全退出 Gama Music。
+
+        </footer>
+
+    </main>
+
+
+    <script src="./server-renderer.js"></script>
+
+</body>
+
+</html>

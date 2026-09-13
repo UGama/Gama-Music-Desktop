@@ -21,6 +21,13 @@ contextBridge.exposeInMainWorld(
       return ipcRenderer.invoke(
         'desktop:open-data-folder'
       );
+    },
+
+
+    openWebApp() {
+      return ipcRenderer.invoke(
+        'desktop:open-web-app'
+      );
     }
 
   }
