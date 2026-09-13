@@ -37,6 +37,15 @@ const CORS_ORIGIN = process.env.GAMA_MUSIC_CORS_ORIGIN || '*';
 const jobs = new Map();
 const favoriteJobs = new Map();
 
+
+/*
+ * B站收藏夹同时最多处理 3 首。
+ *
+ * 3 对目前的 Mac / yt-dlp / ffmpeg
+ * 是速度和稳定性之间比较合适的平衡。
+ */
+const FAVORITE_DOWNLOAD_CONCURRENCY = 3;
+
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
 
@@ -444,15 +453,64 @@ async function ensureTrackCover(
         track.id
       );
 
-    track.cover =
+
+    /*
+     * 下载封面期间，
+     * 其他并发任务可能已经修改了 library.json。
+     *
+     * 所以这里重新读取最新版，
+     * 避免把其他任务的新歌曲覆盖掉。
+     */
+    const latestLibrary =
+      readLibrary();
+
+
+    const latestTrack =
+      latestLibrary.tracks.find(
+        (item) =>
+          item.id === trackId
+      );
+
+
+    /*
+     * 如果歌曲期间已经被删除，
+     * 把刚下载的封面也清掉。
+     */
+    if (!latestTrack) {
+
+      fs.rmSync(
+        path.join(
+          MEDIA_DIR,
+          coverFile
+        ),
+        {
+          force: true
+        }
+      );
+
+      return null;
+    }
+
+
+    latestTrack.cover =
       coverFile;
 
-    track.updatedAt =
+
+    latestTrack.updatedAt =
       nowIso();
 
-    writeLibrary(library);
+
+    writeLibrary(
+      latestLibrary
+    );
+
+
+    return publicTrack(
+      latestTrack
+    );
 
   } catch (error) {
+
     /*
      * 封面失败不应该导致整首 MP3 失败。
      */
@@ -462,7 +520,25 @@ async function ensureTrackCover(
     );
   }
 
-  return publicTrack(track);
+
+  /*
+   * 即使封面下载失败，
+   * 也返回最新版歌曲信息。
+   */
+  const latestLibrary =
+    readLibrary();
+
+
+  const latestTrack =
+    latestLibrary.tracks.find(
+      (item) =>
+        item.id === trackId
+    );
+
+
+  return latestTrack
+    ? publicTrack(latestTrack)
+    : null;
 }
 
 function execYtDlpJson(videoUrl) {
@@ -1077,8 +1153,104 @@ async function runDownloadJob(job) {
         nowIso()
     };
 
-    library.tracks.unshift(track);
-    writeLibrary(library);
+    /*
+ * 下载和封面处理期间，
+ * 其他并发任务可能已经更新音乐库。
+ *
+ * 写入前必须重新读取最新版。
+ */
+    const latestLibrary =
+      readLibrary();
+
+
+    /*
+     * 并发情况下，
+     * 另一项任务可能刚刚已经保存了
+     * 同一个 B站视频。
+     */
+    const duplicateBeforeSave =
+      findDuplicate(
+        latestLibrary,
+        summary.source
+      );
+
+
+    if (duplicateBeforeSave) {
+
+      /*
+       * 当前任务下载出来的重复 MP3
+       * 不再需要。
+       */
+      fs.rmSync(
+        finalPath,
+        {
+          force: true
+        }
+      );
+
+
+      /*
+       * 当前任务自己的封面也删除，
+       * 避免留下孤立文件。
+       */
+      if (coverFileName) {
+
+        fs.rmSync(
+          path.join(
+            MEDIA_DIR,
+            coverFileName
+          ),
+          {
+            force: true
+          }
+        );
+
+      }
+
+
+      const updatedTrack =
+        await ensureTrackCover(
+          duplicateBeforeSave.id,
+          info
+        );
+
+
+      job.status =
+        'duplicate';
+
+
+      job.stage =
+        '这个视频已经下载过';
+
+
+      job.progress =
+        100;
+
+
+      job.existingTrack =
+        updatedTrack ||
+        publicTrack(
+          duplicateBeforeSave
+        );
+
+
+      job.updatedAt =
+        nowIso();
+
+
+      return;
+    }
+
+
+    latestLibrary.tracks.unshift(
+      track
+    );
+
+
+    writeLibrary(
+      latestLibrary
+    );
+
 
     job.status = 'complete';
     job.stage = '下载完成';
@@ -1190,153 +1362,413 @@ function addFavoriteJobTrack(
 }
 
 
-async function runFavoriteImportJob(job, videos) {
+async function runFavoriteImportJob(
+  job,
+  videos
+) {
+
   try {
-    job.status = 'running';
-    job.stage = '正在导入收藏夹';
 
-    job.updatedAt = nowIso();
+    job.status =
+      'running';
 
-    for (let index = 0; index < videos.length; index += 1) {
-      const video = videos[index];
+    job.stage =
+      '正在导入收藏夹';
 
-      job.currentIndex = index + 1;
+    job.updatedAt =
+      nowIso();
+
+
+    /*
+     * 下一个还没有分配给 worker 的歌曲序号。
+     */
+    let nextIndex = 0;
+
+
+    /*
+     * 处理单独一首歌曲。
+     */
+    async function processVideo(
+      index
+    ) {
+
+      const video =
+        videos[index];
+
+
+      /*
+       * 有 3 个任务同时运行，
+       * 所以这里显示最近开始处理的歌曲。
+       */
+      job.currentIndex =
+        Math.max(
+          job.currentIndex || 0,
+          index + 1
+        );
+
+
       job.currentVideo = {
-        id: video.id,
-        url: video.url,
-        title: video.title
+        id:
+          video.id,
+
+        url:
+          video.url,
+
+        title:
+          video.title
       };
 
-      job.stage = `正在处理 ${index + 1} / ${videos.length}`;
-      job.updatedAt = nowIso();
 
-      const library = readLibrary();
+      job.stage =
+        `正在处理 ${index + 1} / ${videos.length}`;
 
-      const source = buildSource(video.url, {
-        id: video.id,
-        webpage_url: video.url
-      });
 
-      const duplicate = findDuplicate(library, source);
+      job.updatedAt =
+        nowIso();
 
-      // 已存在：不下载，直接加入播放列表
-      if (duplicate) {
 
-        job.duplicates += 1;
+      try {
 
         /*
-         * MP3 已经存在，
-         * 但如果没有封面就单独补封面。
+         * 开始前重新读取最新版音乐库。
          */
-        if (!trackHasCover(duplicate)) {
+        const library =
+          readLibrary();
 
-          job.stage =
-            `正在补封面 ${index + 1} / ${videos.length}`;
 
-          try {
-            const info =
-              await execYtDlpJson(
+        const source =
+          buildSource(
+            video.url,
+            {
+              id:
+                video.id,
+
+              webpage_url:
                 video.url
+            }
+          );
+
+
+        const duplicate =
+          findDuplicate(
+            library,
+            source
+          );
+
+
+        /*
+         * 已经存在：
+         * 不重新下载 MP3。
+         */
+        if (duplicate) {
+
+          job.duplicates += 1;
+
+
+          /*
+           * MP3 已有，
+           * 但没有封面的话补一次。
+           */
+          if (
+            !trackHasCover(
+              duplicate
+            )
+          ) {
+
+            try {
+
+              const info =
+                await execYtDlpJson(
+                  video.url
+                );
+
+
+              await ensureTrackCover(
+                duplicate.id,
+                info
               );
 
-            await ensureTrackCover(
-              duplicate.id,
-              info
-            );
+            } catch (error) {
 
-          } catch (error) {
-            console.warn(
-              `补封面失败 ${video.title}:`,
-              error.message
-            );
+              console.warn(
+                `补封面失败 ${video.title}:`,
+                error.message
+              );
+
+            }
+
           }
+
+
+          addFavoriteJobTrack(
+            job,
+            duplicate.id
+          );
+
+
+          return;
         }
 
-        addFavoriteJobTrack(
-          job,
-          duplicate.id
+
+        /*
+         * 不存在：
+         * 创建普通单曲下载任务。
+         */
+        const childJob = {
+
+          id:
+            makeId('job'),
+
+          url:
+            video.url,
+
+          title:
+            '',
+
+          status:
+            'queued',
+
+          stage:
+            '排队中',
+
+          progress:
+            0,
+
+          createdAt:
+            nowIso(),
+
+          updatedAt:
+            nowIso()
+
+        };
+
+
+        jobs.set(
+          childJob.id,
+          childJob
         );
 
 
-        job.processed += 1;
-        job.updatedAt = nowIso();
-
-        continue;
-      }
-
-      // 不存在：正常下载
-      const childJob = {
-        id: makeId('job'),
-        url: video.url,
-        title: '',
-        status: 'queued',
-        stage: '排队中',
-        progress: 0,
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      };
-
-      jobs.set(childJob.id, childJob);
-
-      await runDownloadJob(childJob);
-
-      if (
-        childJob.status === 'complete' &&
-        childJob.track
-      ) {
-
-        job.downloaded += 1;
-
-
-        addFavoriteJobTrack(
-          job,
-          childJob.track.id
+        /*
+         * 注意：
+         *
+         * 这里仍然 await 单个任务，
+         * 但我们会同时启动 3 个 worker。
+         *
+         * 所以最多同时存在
+         * 3 个 runDownloadJob。
+         */
+        await runDownloadJob(
+          childJob
         );
 
 
+        if (
+          childJob.status ===
+          'complete' &&
+          childJob.track
+        ) {
 
-      } else if (
-        childJob.status === 'duplicate' &&
-        childJob.existingTrack
-      ) {
-
-        job.duplicates += 1;
-
-
-        addFavoriteJobTrack(
-          job,
-          childJob.existingTrack.id
-        );
+          job.downloaded += 1;
 
 
+          addFavoriteJobTrack(
+            job,
+            childJob.track.id
+          );
 
-      } else {
+        } else if (
+          childJob.status ===
+          'duplicate' &&
+          childJob.existingTrack
+        ) {
+
+          /*
+           * 可能其他并发 worker
+           * 刚好已经把同一首存进去了。
+           */
+          job.duplicates += 1;
+
+
+          addFavoriteJobTrack(
+            job,
+            childJob.existingTrack.id
+          );
+
+        } else {
+
+          job.failed += 1;
+
+
+          job.failures.push({
+            id:
+              video.id,
+
+            url:
+              video.url,
+
+            title:
+              video.title,
+
+            error:
+              childJob.error ||
+              '未知错误'
+          });
+
+        }
+
+      } catch (error) {
+
+        /*
+         * 单独一首出错，
+         * 不让整个收藏夹停止。
+         */
         job.failed += 1;
 
+
         job.failures.push({
-          id: video.id,
-          url: video.url,
-          title: video.title,
-          error: childJob.error || '未知错误'
+          id:
+            video.id,
+
+          url:
+            video.url,
+
+          title:
+            video.title,
+
+          error:
+            error.message ||
+            '未知错误'
         });
+
+      } finally {
+
+        /*
+         * 无论成功、重复还是失败，
+         * 这一首都算处理完成。
+         *
+         * JS 在这里修改数字是同步的，
+         * 三个 worker 不会把计数覆盖掉。
+         */
+        job.processed += 1;
+
+
+        job.stage =
+          `已处理 ${job.processed} / ${videos.length}`;
+
+
+        job.updatedAt =
+          nowIso();
+
       }
 
-      job.processed += 1;
-      job.updatedAt = nowIso();
     }
 
-    job.status = 'complete';
-    job.stage = '收藏夹导入完成';
-    job.currentVideo = null;
-    job.updatedAt = nowIso();
+
+    /*
+     * 一个 worker：
+     *
+     * 拿一首
+     * ↓
+     * 处理完
+     * ↓
+     * 马上拿下一首
+     */
+    async function worker() {
+
+      while (true) {
+
+        if (
+          nextIndex >=
+          videos.length
+        ) {
+          return;
+        }
+
+
+        const index =
+          nextIndex;
+
+
+        nextIndex += 1;
+
+
+        await processVideo(
+          index
+        );
+
+      }
+
+    }
+
+
+    /*
+     * 最多同时 3 个 worker。
+     *
+     * 如果收藏夹只有 1～2 首，
+     * 就只创建实际需要的数量。
+     */
+    const workerCount =
+      Math.min(
+        FAVORITE_DOWNLOAD_CONCURRENCY,
+        videos.length
+      );
+
+
+    await Promise.all(
+      Array.from(
+        {
+          length:
+            workerCount
+        },
+        () =>
+          worker()
+      )
+    );
+
+
+    job.status =
+      'complete';
+
+
+    job.stage =
+      '收藏夹导入完成';
+
+
+    job.currentIndex =
+      videos.length;
+
+
+    job.currentVideo =
+      null;
+
+
+    job.updatedAt =
+      nowIso();
 
   } catch (error) {
-    job.status = 'failed';
-    job.stage = '收藏夹导入失败';
-    job.error = error.message;
-    job.currentVideo = null;
-    job.updatedAt = nowIso();
+
+    job.status =
+      'failed';
+
+
+    job.stage =
+      '收藏夹导入失败';
+
+
+    job.error =
+      error.message;
+
+
+    job.currentVideo =
+      null;
+
+
+    job.updatedAt =
+      nowIso();
+
   }
+
 }
 
 function sendJson(res, statusCode, payload) {
