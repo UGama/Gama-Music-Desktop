@@ -16,14 +16,19 @@ const STORAGE_DIR =
   process.env.GAMA_MUSIC_STORAGE_DIR ||
   ROOT_DIR;
 
-const DATA_DIR =
-  path.join(STORAGE_DIR, 'data');
 
-const MEDIA_DIR =
-  path.join(STORAGE_DIR, 'media');
-
-const LIBRARY_PATH =
-  path.join(DATA_DIR, 'library.json');
+/*
+ * 新架构的临时传输目录。
+ *
+ * Desktop 以后下载出来的 MP3 / 封面
+ * 会先放这里，
+ * Web 保存进 IndexedDB 后即可清理。
+ */
+const TRANSFER_DIR =
+  path.join(
+    STORAGE_DIR,
+    'transfer'
+  );
 
 const PORT = Number(process.env.PORT || 7330);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -46,42 +51,159 @@ const favoriteJobs = new Map();
  */
 const FAVORITE_DOWNLOAD_CONCURRENCY = 3;
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(MEDIA_DIR, { recursive: true });
+/*
+ * transfer 只是临时传输区。
+ *
+ * 正常情况下 Web 保存成功后
+ * 会立刻通知 Desktop 删除。
+ *
+ * 如果 Web 中途关闭、断网或者崩溃，
+ * 最迟 24 小时后自动清理。
+ */
+const TRANSFER_MAX_AGE_MS =
+  24 * 60 * 60 * 1000;
+
+
+const TRANSFER_CLEANUP_INTERVAL_MS =
+  60 * 60 * 1000;
+
+fs.mkdirSync(
+  TRANSFER_DIR,
+  { recursive: true }
+);
+
+function cleanupExpiredTransferFiles() {
+
+  const cutoff =
+    Date.now() -
+    TRANSFER_MAX_AGE_MS;
+
+
+  let entries;
+
+
+  try {
+
+    entries =
+      fs.readdirSync(
+        TRANSFER_DIR,
+        {
+          withFileTypes: true
+        }
+      );
+
+  } catch (error) {
+
+    console.warn(
+      '无法读取 transfer 目录：',
+      error.message
+    );
+
+    return 0;
+
+  }
+
+
+  let removedCount = 0;
+
+
+  for (
+    const entry
+    of entries
+  ) {
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+
+    const filePath =
+      path.join(
+        TRANSFER_DIR,
+        entry.name
+      );
+
+
+    try {
+
+      const stat =
+        fs.statSync(
+          filePath
+        );
+
+
+      /*
+       * 24 小时以内的文件保留。
+       */
+      if (
+        stat.mtimeMs >= cutoff
+      ) {
+
+        continue;
+
+      }
+
+
+      fs.rmSync(
+        filePath,
+        {
+          force: true
+        }
+      );
+
+
+      removedCount += 1;
+
+    } catch (error) {
+
+      console.warn(
+        `清理临时文件失败 ${entry.name}:`,
+        error.message
+      );
+
+    }
+
+  }
+
+
+  if (removedCount > 0) {
+
+    console.log(
+      `已清理 ${removedCount} 个过期临时文件`
+    );
+
+  }
+
+
+  return removedCount;
+
+}
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function defaultLibrary() {
-  return {
-    version: 1,
-    tracks: [],
-    playlists: [],
-    updatedAt: nowIso()
-  };
-}
+/*
+ * Desktop 启动时先清理一次。
+ */
+cleanupExpiredTransferFiles();
 
-function readLibrary() {
-  if (!fs.existsSync(LIBRARY_PATH)) {
-    const initial = defaultLibrary();
-    writeLibrary(initial);
-    return initial;
-  }
 
-  const parsed = JSON.parse(fs.readFileSync(LIBRARY_PATH, 'utf8'));
-  parsed.version = parsed.version || 1;
-  parsed.tracks = Array.isArray(parsed.tracks) ? parsed.tracks : [];
-  parsed.playlists = Array.isArray(parsed.playlists) ? parsed.playlists : [];
-  return parsed;
-}
+/*
+ * 之后每小时检查一次。
+ */
+const transferCleanupTimer =
+  setInterval(
+    cleanupExpiredTransferFiles,
+    TRANSFER_CLEANUP_INTERVAL_MS
+  );
 
-function writeLibrary(library) {
-  library.updatedAt = nowIso();
-  const tmpPath = `${LIBRARY_PATH}.tmp`;
-  fs.writeFileSync(tmpPath, `${JSON.stringify(library, null, 2)}\n`);
-  fs.renameSync(tmpPath, LIBRARY_PATH);
-}
+
+/*
+ * 清理定时器本身不能阻止
+ * Node / Electron 正常退出。
+ */
+transferCleanupTimer.unref?.();
 
 function publicTrack(track) {
   return {
@@ -100,14 +222,6 @@ function publicTrack(track) {
   };
 }
 
-function publicLibrary(library) {
-  return {
-    version: library.version,
-    tracks: library.tracks.map(publicTrack),
-    updatedAt: library.updatedAt
-  };
-}
-
 function makeId(prefix) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 }
@@ -121,19 +235,6 @@ function addCookieArgs(args) {
   if (COOKIE_BROWSER && COOKIE_BROWSER.toLowerCase() !== 'none') {
     args.push('--cookies-from-browser', COOKIE_BROWSER);
   }
-}
-
-function trackHasCover(track) {
-  if (!track?.cover) return false;
-
-  const coverPath =
-    path.join(MEDIA_DIR, track.cover);
-
-  return (
-    fs.existsSync(coverPath) &&
-    fs.statSync(coverPath).isFile() &&
-    fs.statSync(coverPath).size > 0
-  );
 }
 
 
@@ -224,6 +325,7 @@ function coverExtension(contentType, urlValue) {
 function downloadCoverImage(
   urlValue,
   trackId,
+  targetDir = TRANSFER_DIR,
   redirectCount = 0
 ) {
   return new Promise((resolve, reject) => {
@@ -292,6 +394,7 @@ function downloadCoverImage(
               downloadCoverImage(
                 nextUrl,
                 trackId,
+                targetDir,
                 redirectCount + 1
               )
             );
@@ -325,7 +428,7 @@ function downloadCoverImage(
 
           const finalPath =
             path.join(
-              MEDIA_DIR,
+              targetDir,
               fileName
             );
 
@@ -408,137 +511,6 @@ function downloadCoverImage(
       reject
     );
   });
-}
-
-
-async function ensureTrackCover(
-  trackId,
-  info
-) {
-  const library =
-    readLibrary();
-
-  const track =
-    library.tracks.find(
-      (item) => item.id === trackId
-    );
-
-  if (!track) {
-    return null;
-  }
-
-  /*
-   * 本地真的已经有封面：
-   * 什么都不下载。
-   */
-  if (trackHasCover(track)) {
-    return publicTrack(track);
-  }
-
-  const thumbnailUrl =
-    pickThumbnailUrl(info);
-
-  /*
-   * B站没有提供封面：
-   * 留空，前端以后显示默认封面。
-   */
-  if (!thumbnailUrl) {
-    return publicTrack(track);
-  }
-
-  try {
-    const coverFile =
-      await downloadCoverImage(
-        thumbnailUrl,
-        track.id
-      );
-
-
-    /*
-     * 下载封面期间，
-     * 其他并发任务可能已经修改了 library.json。
-     *
-     * 所以这里重新读取最新版，
-     * 避免把其他任务的新歌曲覆盖掉。
-     */
-    const latestLibrary =
-      readLibrary();
-
-
-    const latestTrack =
-      latestLibrary.tracks.find(
-        (item) =>
-          item.id === trackId
-      );
-
-
-    /*
-     * 如果歌曲期间已经被删除，
-     * 把刚下载的封面也清掉。
-     */
-    if (!latestTrack) {
-
-      fs.rmSync(
-        path.join(
-          MEDIA_DIR,
-          coverFile
-        ),
-        {
-          force: true
-        }
-      );
-
-      return null;
-    }
-
-
-    latestTrack.cover =
-      coverFile;
-
-
-    latestTrack.updatedAt =
-      nowIso();
-
-
-    writeLibrary(
-      latestLibrary
-    );
-
-
-    return publicTrack(
-      latestTrack
-    );
-
-  } catch (error) {
-
-    /*
-     * 封面失败不应该导致整首 MP3 失败。
-     */
-    console.warn(
-      `封面下载失败 ${track.title}:`,
-      error.message
-    );
-  }
-
-
-  /*
-   * 即使封面下载失败，
-   * 也返回最新版歌曲信息。
-   */
-  const latestLibrary =
-    readLibrary();
-
-
-  const latestTrack =
-    latestLibrary.tracks.find(
-      (item) =>
-        item.id === trackId
-    );
-
-
-  return latestTrack
-    ? publicTrack(latestTrack)
-    : null;
 }
 
 function execYtDlpJson(videoUrl) {
@@ -847,58 +819,54 @@ function extractBilibiliFavoriteIdentity(rawUrl) {
   };
 }
 
+function summarizeInfo(
+  rawUrl,
+  info
+) {
 
-function buildFavoritesImportPreview(result) {
-  const library = readLibrary();
+  const source =
+    buildSource(
+      rawUrl,
+      info
+    );
 
-  const videos = result.videos.map((video, index) => {
-    const source = buildSource(video.url, {
-      id: video.id,
-      webpage_url: video.url,
-      title: video.title
-    });
 
-    const duplicate = findDuplicate(library, source);
-
-    return {
-      index: index + 1,
-      id: video.id,
-      key: source.key,
-      url: video.url,
-      title: video.title,
-      duplicate: Boolean(duplicate),
-      existingTrack: duplicate
-        ? publicTrack(duplicate)
-        : null
-    };
-  });
-
-  const duplicateCount =
-    videos.filter((video) => video.duplicate).length;
-
+  /*
+   * Desktop 不再判断
+   * 用户的音乐库里有没有这首歌。
+   *
+   * 音乐库属于 Web。
+   */
   return {
-    title: result.title,
-    count: videos.length,
-    duplicateCount,
-    pendingCount: videos.length - duplicateCount,
-    videos
-  };
-}
 
-function summarizeInfo(rawUrl, info) {
-  const source = buildSource(rawUrl, info);
-  const library = readLibrary();
-  const duplicate = findDuplicate(library, source);
+    title:
+      cleanTitle(
+        info.title,
+        source.id
+      ),
 
-  return {
-    title: cleanTitle(info.title, source.id),
-    originalTitle: cleanTitle(info.title, source.id),
-    duration: Number.isFinite(info.duration) ? info.duration : null,
-    uploader: info.uploader || info.channel || null,
-    source,
-    duplicate: Boolean(duplicate),
-    existingTrack: duplicate ? publicTrack(duplicate) : null
+    originalTitle:
+      cleanTitle(
+        info.title,
+        source.id
+      ),
+
+    duration:
+      Number.isFinite(
+        info.duration
+      )
+        ? info.duration
+        : null,
+
+    uploader:
+      info.uploader ||
+      info.channel ||
+      null,
+
+    source
+
   };
+
 }
 
 function spawnDownload(job, args) {
@@ -924,7 +892,7 @@ function spawnDownload(job, args) {
       YTDLP_BIN,
       downloadArgs,
       {
-        cwd: MEDIA_DIR,
+        cwd: TRANSFER_DIR,
         stdio: [
           'ignore',
           'pipe',
@@ -980,50 +948,21 @@ async function runDownloadJob(job) {
     const summary = summarizeInfo(job.url, info);
     job.preview = summary;
 
-    const libraryBeforeDownload = readLibrary();
-    const duplicate = findDuplicate(libraryBeforeDownload, summary.source);
-    if (duplicate) {
-
-      job.stage =
-        trackHasCover(duplicate)
-          ? '这个视频已经下载过'
-          : '歌曲已经存在，正在检查封面';
-
-      job.progress =
-        trackHasCover(duplicate)
-          ? 100
-          : 90;
-
-      const updatedTrack =
-        await ensureTrackCover(
-          duplicate.id,
-          info
-        );
-
-      job.status =
-        'duplicate';
-
-      job.stage =
-        updatedTrack?.cover
-          ? '歌曲已经存在，封面已检查'
-          : '歌曲已经存在';
-
-      job.progress = 100;
-
-      job.existingTrack =
-        updatedTrack ||
-        publicTrack(duplicate);
-
-      job.updatedAt =
-        nowIso();
-
-      return;
-    }
-
     const trackId = makeId('trk');
-    const outputTemplate = path.join(MEDIA_DIR, `${trackId}.%(ext)s`);
-    const finalFileName = `${trackId}.mp3`;
-    const finalPath = path.join(MEDIA_DIR, finalFileName);
+    const outputTemplate =
+      path.join(
+        TRANSFER_DIR,
+        `${trackId}.%(ext)s`
+      );
+
+    const finalFileName =
+      `${trackId}.mp3`;
+
+    const finalPath =
+      path.join(
+        TRANSFER_DIR,
+        finalFileName
+      );
 
     job.status = 'downloading';
     job.stage = '正在下载音频';
@@ -1050,42 +989,6 @@ async function runDownloadJob(job) {
       throw new Error('下载完成，但没有找到转换后的 MP3 文件。请检查 ffmpeg 是否可用。');
     }
 
-    const library = readLibrary();
-    const duplicateAfterDownload = findDuplicate(library, summary.source);
-    if (duplicateAfterDownload) {
-
-      fs.rmSync(
-        finalPath,
-        { force: true }
-      );
-
-      const updatedTrack =
-        await ensureTrackCover(
-          duplicateAfterDownload.id,
-          info
-        );
-
-      job.status =
-        'duplicate';
-
-      job.stage =
-        '这个视频已经下载过';
-
-      job.progress =
-        100;
-
-      job.existingTrack =
-        updatedTrack ||
-        publicTrack(
-          duplicateAfterDownload
-        );
-
-      job.updatedAt =
-        nowIso();
-
-      return;
-    }
-
     let coverFileName = null;
 
     const thumbnailUrl =
@@ -1105,7 +1008,8 @@ async function runDownloadJob(job) {
         coverFileName =
           await downloadCoverImage(
             thumbnailUrl,
-            trackId
+            trackId,
+            TRANSFER_DIR
           );
       } catch (error) {
         console.warn(
@@ -1153,110 +1057,32 @@ async function runDownloadJob(job) {
         nowIso()
     };
 
+
     /*
- * 下载和封面处理期间，
- * 其他并发任务可能已经更新音乐库。
+ * 新架构：
  *
- * 写入前必须重新读取最新版。
+ * 下载完成以后不再写入
+ * Desktop 的 library.json。
+ *
+ * MP3 + 封面暂时留在 transfer，
+ * job.track 直接交给 Web。
  */
-    const latestLibrary =
-      readLibrary();
+    job.status =
+      'complete';
 
+    job.stage =
+      '等待 Web 保存';
 
-    /*
-     * 并发情况下，
-     * 另一项任务可能刚刚已经保存了
-     * 同一个 B站视频。
-     */
-    const duplicateBeforeSave =
-      findDuplicate(
-        latestLibrary,
-        summary.source
+    job.progress =
+      100;
+
+    job.track =
+      publicTrack(
+        track
       );
 
-
-    if (duplicateBeforeSave) {
-
-      /*
-       * 当前任务下载出来的重复 MP3
-       * 不再需要。
-       */
-      fs.rmSync(
-        finalPath,
-        {
-          force: true
-        }
-      );
-
-
-      /*
-       * 当前任务自己的封面也删除，
-       * 避免留下孤立文件。
-       */
-      if (coverFileName) {
-
-        fs.rmSync(
-          path.join(
-            MEDIA_DIR,
-            coverFileName
-          ),
-          {
-            force: true
-          }
-        );
-
-      }
-
-
-      const updatedTrack =
-        await ensureTrackCover(
-          duplicateBeforeSave.id,
-          info
-        );
-
-
-      job.status =
-        'duplicate';
-
-
-      job.stage =
-        '这个视频已经下载过';
-
-
-      job.progress =
-        100;
-
-
-      job.existingTrack =
-        updatedTrack ||
-        publicTrack(
-          duplicateBeforeSave
-        );
-
-
-      job.updatedAt =
-        nowIso();
-
-
-      return;
-    }
-
-
-    latestLibrary.tracks.unshift(
-      track
-    );
-
-
-    writeLibrary(
-      latestLibrary
-    );
-
-
-    job.status = 'complete';
-    job.stage = '下载完成';
-    job.progress = 100;
-    job.track = publicTrack(track);
-    job.updatedAt = nowIso();
+    job.updatedAt =
+      nowIso();
   } catch (error) {
     job.status = 'failed';
     job.stage = '下载失败';
@@ -1281,6 +1107,11 @@ function publicFavoriteJob(job) {
     trackIds:
       Array.isArray(job.trackIds)
         ? job.trackIds
+        : [],
+
+    tracks:
+      Array.isArray(job.tracks)
+        ? job.tracks
         : [],
 
     total:
@@ -1328,10 +1159,10 @@ function publicFavoriteJob(job) {
 
 function addFavoriteJobTrack(
   job,
-  trackId
+  track
 ) {
 
-  if (!trackId) {
+  if (!track?.id) {
     return;
   }
 
@@ -1348,14 +1179,59 @@ function addFavoriteJobTrack(
 
 
   if (
+    !Array.isArray(
+      job.tracks
+    )
+  ) {
+
+    job.tracks = [];
+
+  }
+
+
+  /*
+   * 保留旧 trackIds，
+   * 这样现在的 Web 不会被破坏。
+   */
+  if (
     !job.trackIds.includes(
-      trackId
+      track.id
     )
   ) {
 
     job.trackIds.push(
-      trackId
+      track.id
     );
+
+  }
+
+
+  /*
+   * 同时保存完整歌曲信息。
+   *
+   * 下一阶段 Web 就可以直接使用这里，
+   * 不再依赖 /api/library。
+   */
+  const existingIndex =
+    job.tracks.findIndex(
+      (item) =>
+        item.id === track.id
+    );
+
+
+  if (
+    existingIndex === -1
+  ) {
+
+    job.tracks.push(
+      track
+    );
+
+  } else {
+
+    job.tracks[
+      existingIndex
+    ] = track;
 
   }
 
@@ -1364,8 +1240,25 @@ function addFavoriteJobTrack(
 
 async function runFavoriteImportJob(
   job,
-  videos
+  videos,
+  existingTracks = []
 ) {
+
+  /*
+   * 这是 Web 临时告诉 Desktop 的
+   * “我已经真正保存好的歌曲”。
+   *
+   * 它只存在于当前任务内存中，
+   * 不写 library.json。
+   */
+  const webLibrary = {
+    tracks:
+      Array.isArray(
+        existingTracks
+      )
+        ? existingTracks
+        : []
+  };
 
   try {
 
@@ -1429,12 +1322,6 @@ async function runFavoriteImportJob(
 
       try {
 
-        /*
-         * 开始前重新读取最新版音乐库。
-         */
-        const library =
-          readLibrary();
-
 
         const source =
           buildSource(
@@ -1451,10 +1338,9 @@ async function runFavoriteImportJob(
 
         const duplicate =
           findDuplicate(
-            library,
+            webLibrary,
             source
           );
-
 
         /*
          * 已经存在：
@@ -1462,53 +1348,22 @@ async function runFavoriteImportJob(
          */
         if (duplicate) {
 
-          job.duplicates += 1;
-
-
           /*
-           * MP3 已有，
-           * 但没有封面的话补一次。
+           * Web 已经真正拥有这首歌，
+           * Desktop 不需要做任何事情。
            */
-          if (
-            !trackHasCover(
-              duplicate
-            )
-          ) {
-
-            try {
-
-              const info =
-                await execYtDlpJson(
-                  video.url
-                );
-
-
-              await ensureTrackCover(
-                duplicate.id,
-                info
-              );
-
-            } catch (error) {
-
-              console.warn(
-                `补封面失败 ${video.title}:`,
-                error.message
-              );
-
-            }
-
-          }
+          job.duplicates += 1;
 
 
           addFavoriteJobTrack(
             job,
-            duplicate.id
+            duplicate
           );
 
 
           return;
-        }
 
+        }
 
         /*
          * 不存在：
@@ -1574,29 +1429,11 @@ async function runFavoriteImportJob(
 
           addFavoriteJobTrack(
             job,
-            childJob.track.id
+            childJob.track
           );
 
-        } else if (
-          childJob.status ===
-          'duplicate' &&
-          childJob.existingTrack
-        ) {
-
-          /*
-           * 可能其他并发 worker
-           * 刚好已经把同一首存进去了。
-           */
-          job.duplicates += 1;
-
-
-          addFavoriteJobTrack(
-            job,
-            childJob.existingTrack.id
-          );
 
         } else {
-
           job.failed += 1;
 
 
@@ -1816,6 +1653,109 @@ function requireUrl(body) {
   return value;
 }
 
+function cleanupTransferFiles(
+  trackId
+) {
+
+  const id =
+    String(
+      trackId || ''
+    ).trim();
+
+
+  /*
+   * Gama Music 自己生成的歌曲 ID：
+   *
+   * trk_ + 16 位十六进制字符
+   *
+   * 严格检查 ID，
+   * 避免这个接口删除 transfer
+   * 目录以外的任何文件。
+   */
+  if (
+    !/^trk_[0-9a-f]{16}$/i.test(
+      id
+    )
+  ) {
+
+    throw new Error(
+      '临时歌曲 ID 无效'
+    );
+
+  }
+
+
+  const removedFiles =
+    [];
+
+
+  const entries =
+    fs.readdirSync(
+      TRANSFER_DIR,
+      {
+        withFileTypes: true
+      }
+    );
+
+
+  for (
+    const entry
+    of entries
+  ) {
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+
+    const fileName =
+      entry.name;
+
+
+    const isAudio =
+      fileName ===
+      `${id}.mp3`;
+
+
+    const isCover =
+      fileName.startsWith(
+        `${id}-cover.`
+      );
+
+
+    if (
+      !isAudio &&
+      !isCover
+    ) {
+
+      continue;
+
+    }
+
+
+    fs.rmSync(
+      path.join(
+        TRANSFER_DIR,
+        fileName
+      ),
+      {
+        force: true
+      }
+    );
+
+
+    removedFiles.push(
+      fileName
+    );
+
+  }
+
+
+  return removedFiles;
+
+}
+
+
 async function handleApi(req, res, url) {
   if (req.method === 'OPTIONS') {
     sendJson(res, 204, {});
@@ -1833,10 +1773,6 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (req.method === 'GET' && url.pathname === '/api/library') {
-    sendJson(res, 200, publicLibrary(readLibrary()));
-    return;
-  }
 
   if (req.method === 'POST' && url.pathname === '/api/preview') {
     const body = await readJsonBody(req);
@@ -1848,27 +1784,20 @@ async function handleApi(req, res, url) {
 
   if (
     req.method === 'POST' &&
-    url.pathname === '/api/favorites/preview'
-  ) {
-    const body = await readJsonBody(req);
-    const playlistUrl = requireUrl(body);
-
-    const rawResult =
-      await execYtDlpPlaylistJson(playlistUrl);
-
-    const result =
-      buildFavoritesImportPreview(rawResult);
-
-    sendJson(res, 200, result);
-    return;
-  }
-
-  if (
-    req.method === 'POST' &&
     url.pathname === '/api/favorites/import'
   ) {
     const body = await readJsonBody(req);
     const playlistUrl = requireUrl(body);
+    const existingTracks =
+      Array.isArray(
+        body.existingTracks
+      )
+        ? body.existingTracks
+          .filter(
+            (track) =>
+              track?.id
+          )
+        : [];
 
     const rawResult =
       await execYtDlpPlaylistJson(playlistUrl);
@@ -1898,6 +1827,9 @@ async function handleApi(req, res, url) {
         favoriteSource.key,
 
       trackIds:
+        [],
+
+      tracks:
         [],
 
       total:
@@ -1936,7 +1868,8 @@ async function handleApi(req, res, url) {
     // 注意：传全部视频
     runFavoriteImportJob(
       job,
-      rawResult.videos
+      rawResult.videos,
+      existingTracks
     );
 
     sendJson(res, 202, {
@@ -1973,6 +1906,51 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  const transferCompleteMatch =
+    url.pathname.match(
+      /^\/api\/transfers\/([^/]+)\/complete$/
+    );
+
+
+  if (
+    req.method === 'POST' &&
+    transferCompleteMatch
+  ) {
+
+    const trackId =
+      decodeURIComponent(
+        transferCompleteMatch[1]
+      );
+
+
+    /*
+     * Web 已经把 MP3 / 封面
+     * 成功保存进 IndexedDB。
+     *
+     * Desktop 的临时副本
+     * 现在可以安全删除。
+     */
+    const removedFiles =
+      cleanupTransferFiles(
+        trackId
+      );
+
+
+    sendJson(
+      res,
+      200,
+      {
+        ok: true,
+        trackId,
+        removedFiles
+      }
+    );
+
+
+    return;
+
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/download') {
     const body = await readJsonBody(req);
     const videoUrl = requireUrl(body);
@@ -2001,57 +1979,6 @@ async function handleApi(req, res, url) {
     }
     sendJson(res, 200, { job: publicJob(job) });
     return;
-  }
-
-  const trackMatch = url.pathname.match(/^\/api\/tracks\/([^/]+)$/);
-  if (trackMatch) {
-    const trackId = decodeURIComponent(trackMatch[1]);
-    if (req.method === 'PATCH') {
-      const body = await readJsonBody(req);
-      const title = cleanTitle(body.title || '');
-      if (!title) throw new Error('歌名不能为空');
-      const library = readLibrary();
-      const track = library.tracks.find((item) => item.id === trackId);
-      if (!track) {
-        sendJson(res, 404, { error: '没有找到这首歌' });
-        return;
-      }
-      track.title = title;
-      track.updatedAt = nowIso();
-      writeLibrary(library);
-      sendJson(res, 200, { track: publicTrack(track) });
-      return;
-    }
-
-    if (req.method === 'DELETE') {
-      const library = readLibrary();
-      const trackIndex = library.tracks.findIndex((item) => item.id === trackId);
-      if (trackIndex === -1) {
-        sendJson(res, 404, { error: '没有找到这首歌' });
-        return;
-      }
-      const [track] =
-        library.tracks.splice(
-          trackIndex,
-          1
-        );
-
-      writeLibrary(library);
-      if (track.file) {
-        fs.rmSync(path.join(MEDIA_DIR, track.file), { force: true });
-      }
-      if (track.cover) {
-        fs.rmSync(
-          path.join(
-            MEDIA_DIR,
-            track.cover
-          ),
-          { force: true }
-        );
-      }
-      sendJson(res, 200, { ok: true });
-      return;
-    }
   }
 
   sendJson(res, 404, { error: '没有找到这个接口' });
@@ -2133,32 +2060,59 @@ function serveFile(req, res, filePath, contentType) {
   fs.createReadStream(filePath).pipe(res);
 }
 
-function serveMedia(req, res, url) {
-  const fileName = safeDecodeURIComponent(url.pathname.replace(/^\/media\//, ''));
-  const filePath = safeJoin(MEDIA_DIR, `/${fileName}`);
+function serveMedia(
+  req,
+  res,
+  url
+) {
+
+  const fileName =
+    safeDecodeURIComponent(
+      url.pathname.replace(
+        /^\/media\//,
+        ''
+      )
+    );
+
+
+  /*
+   * /media/ 现在只是一个
+   * 临时传输文件接口。
+   *
+   * 所有文件都来自 transfer。
+   */
+  const filePath =
+    safeJoin(
+      TRANSFER_DIR,
+      `/${fileName}`
+    );
+
+
   if (!filePath) {
+
     res.statusCode = 400;
     res.end('Bad path');
     return;
-  }
-  const extension =
-    path.extname(filePath).toLowerCase();
 
-  if (
-    [
-      '.jpg',
-      '.jpeg',
-      '.png',
-      '.webp',
-      '.avif'
-    ].includes(extension)
-  ) {
-    res.setHeader(
-      'Cache-Control',
-      'public, max-age=31536000, immutable'
-    );
   }
-  serveFile(req, res, filePath);
+
+
+  /*
+   * 临时文件不做长期浏览器缓存。
+   * Web 拿到以后会自己保存进 IndexedDB。
+   */
+  res.setHeader(
+    'Cache-Control',
+    'no-store'
+  );
+
+
+  serveFile(
+    req,
+    res,
+    filePath
+  );
+
 }
 
 
@@ -2240,5 +2194,7 @@ server.listen(PORT, HOST, () => {
   }
   console.log('');
   console.log(`Cookie browser: ${COOKIE_BROWSER}`);
-  console.log(`Media folder: ${MEDIA_DIR}`);
+  console.log(
+    `Transfer folder: ${TRANSFER_DIR}`
+  );
 });
