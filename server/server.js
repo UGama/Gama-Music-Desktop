@@ -42,6 +42,22 @@ const CORS_ORIGIN = process.env.GAMA_MUSIC_CORS_ORIGIN || '*';
 const jobs = new Map();
 const favoriteJobs = new Map();
 
+/*
+ * 手机同步会话。
+ *
+ * 只存在 Desktop 内存中，
+ * Desktop 退出后自动消失。
+ */
+const syncSessions =
+  new Map();
+
+
+/*
+ * 一个同步二维码最多有效 15 分钟。
+ */
+const SYNC_SESSION_MAX_AGE_MS =
+  15 * 60 * 1000;
+
 
 /*
  * B站收藏夹同时最多处理 3 首。
@@ -71,6 +87,211 @@ fs.mkdirSync(
   TRANSFER_DIR,
   { recursive: true }
 );
+
+function publicSyncSession(
+  session
+) {
+
+  return {
+
+    id:
+      session.id,
+
+    status:
+      session.status,
+
+    createdAt:
+      session.createdAt,
+
+    updatedAt:
+      session.updatedAt,
+
+    expiresAt:
+      session.expiresAt,
+
+    trackCount:
+      session.trackCount || 0,
+
+    playlistCount:
+      session.playlistCount || 0,
+
+    uploadedTrackCount:
+      Object.values(
+        session.files || {}
+      ).filter(
+        (entry) =>
+          Boolean(
+            entry?.audio
+          )
+      ).length
+
+  };
+
+}
+
+function cleanupSyncSessionFiles(
+  session
+) {
+
+  let removedCount = 0;
+
+
+  const files =
+    session?.files &&
+      typeof session.files ===
+      'object'
+      ? session.files
+      : {};
+
+
+  for (
+    const entry
+    of Object.values(files)
+  ) {
+
+    for (
+      const fileName
+      of [
+        entry?.audio,
+        entry?.cover
+      ]
+    ) {
+
+      if (!fileName) {
+        continue;
+      }
+
+
+      const filePath =
+        safeJoin(
+          TRANSFER_DIR,
+          `/${fileName}`
+        );
+
+
+      if (!filePath) {
+        continue;
+      }
+
+
+      try {
+
+        if (
+          fs.existsSync(
+            filePath
+          )
+        ) {
+
+          fs.rmSync(
+            filePath,
+            {
+              force: true
+            }
+          );
+
+
+          removedCount += 1;
+
+        }
+
+      } catch (error) {
+
+        console.warn(
+          `同步临时文件清理失败 ${fileName}:`,
+          error.message
+        );
+
+      }
+
+    }
+
+  }
+
+
+  return removedCount;
+
+}
+
+function refreshSyncSessionExpiry(
+  session
+) {
+
+  const now =
+    Date.now();
+
+
+  session.updatedAt =
+    new Date(
+      now
+    ).toISOString();
+
+
+  session.expiresAtMs =
+    now +
+    SYNC_SESSION_MAX_AGE_MS;
+
+
+  session.expiresAt =
+    new Date(
+      session.expiresAtMs
+    ).toISOString();
+
+}
+
+function cleanupExpiredSyncSessions() {
+
+  const now =
+    Date.now();
+
+
+  let removedCount = 0;
+
+
+  for (
+    const [
+      sessionId,
+      session
+    ]
+    of syncSessions
+  ) {
+
+    if (
+      session.expiresAtMs >
+      now
+    ) {
+
+      continue;
+
+    }
+
+
+    cleanupSyncSessionFiles(
+      session
+    );
+    syncSessions.delete(
+      sessionId
+    );
+
+
+    removedCount += 1;
+
+  }
+
+
+  if (
+    removedCount > 0
+  ) {
+
+    console.log(
+      `已清理 ${removedCount} 个过期同步会话`
+    );
+
+  }
+
+
+  return removedCount;
+
+}
 
 function cleanupExpiredTransferFiles() {
 
@@ -198,7 +419,18 @@ const transferCleanupTimer =
     TRANSFER_CLEANUP_INTERVAL_MS
   );
 
+/*
+ * 同步会话很短，
+ * 每分钟检查一次即可。
+ */
+const syncSessionCleanupTimer =
+  setInterval(
+    cleanupExpiredSyncSessions,
+    60 * 1000
+  );
 
+
+syncSessionCleanupTimer.unref?.();
 /*
  * 清理定时器本身不能阻止
  * Node / Electron 正常退出。
@@ -1617,6 +1849,99 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function readBinaryBody(
+  req,
+  maxBytes =
+    150 * 1024 * 1024
+) {
+
+  return new Promise(
+    (resolve, reject) => {
+
+      const chunks = [];
+
+      let totalBytes = 0;
+      let failed = false;
+
+
+      req.on(
+        'data',
+        (chunk) => {
+
+          if (failed) {
+            return;
+          }
+
+
+          totalBytes +=
+            chunk.length;
+
+
+          if (
+            totalBytes >
+            maxBytes
+          ) {
+
+            failed = true;
+
+            reject(
+              new Error(
+                '同步文件过大'
+              )
+            );
+
+            return;
+
+          }
+
+
+          chunks.push(
+            chunk
+          );
+
+        }
+      );
+
+
+      req.on(
+        'end',
+        () => {
+
+          if (failed) {
+            return;
+          }
+
+
+          resolve(
+            Buffer.concat(
+              chunks,
+              totalBytes
+            )
+          );
+
+        }
+      );
+
+
+      req.on(
+        'error',
+        (error) => {
+
+          if (failed) {
+            return;
+          }
+
+          failed = true;
+
+          reject(error);
+
+        }
+      );
+
+    }
+  );
+
+}
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -1771,6 +2096,454 @@ async function handleApi(req, res, url) {
       urls: localUrls()
     });
     return;
+  }
+
+  if (
+    req.method === 'POST' &&
+    url.pathname ===
+    '/api/sync/sessions'
+  ) {
+
+    /*
+     * 创建前顺手清理过期会话。
+     */
+    cleanupExpiredSyncSessions();
+
+
+    const createdAtMs =
+      Date.now();
+
+
+    const expiresAtMs =
+      createdAtMs +
+      SYNC_SESSION_MAX_AGE_MS;
+
+
+    const session = {
+
+      id:
+        makeId('sync'),
+
+      status:
+        'waiting',
+
+      trackCount:
+        0,
+
+      playlistCount:
+        0,
+
+      manifest:
+        null,
+
+      files:
+        {},
+
+      createdAt:
+        new Date(
+          createdAtMs
+        ).toISOString(),
+
+      updatedAt:
+        new Date(
+          createdAtMs
+        ).toISOString(),
+
+      expiresAt:
+        new Date(
+          expiresAtMs
+        ).toISOString(),
+
+      expiresAtMs
+
+    };
+
+
+    syncSessions.set(
+      session.id,
+      session
+    );
+
+
+    sendJson(
+      res,
+      201,
+      {
+        session:
+          publicSyncSession(
+            session
+          )
+      }
+    );
+
+
+    return;
+
+  }
+
+  const syncTrackAudioMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)\/tracks\/([^/]+)\/audio$/
+    );
+
+
+  if (
+    req.method === 'POST' &&
+    syncTrackAudioMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncTrackAudioMatch[1]
+      );
+
+
+    const trackId =
+      decodeURIComponent(
+        syncTrackAudioMatch[2]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * 必须先在 manifest 中存在这首歌，
+     * 才允许上传对应 MP3。
+     */
+    const trackExists =
+      Array.isArray(
+        session.manifest?.tracks
+      ) &&
+      session.manifest.tracks.some(
+        (track) =>
+          String(track?.id) ===
+          trackId
+      );
+
+
+    if (!trackExists) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '这首歌不在当前同步清单中'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const audioBuffer =
+      await readBinaryBody(req);
+
+
+    if (!audioBuffer.length) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '没有收到 MP3 数据'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * Desktop 自己生成随机临时文件名，
+     * 不直接使用用户的 trackId 当文件名。
+     */
+    const fileName =
+      `${makeId('sync-audio')}.mp3`;
+
+
+    const filePath =
+      path.join(
+        TRANSFER_DIR,
+        fileName
+      );
+
+
+    fs.writeFileSync(
+      filePath,
+      audioBuffer
+    );
+
+
+    /*
+     * 如果同一首歌重新上传，
+     * 删除上一份临时 MP3。
+     */
+    const oldAudio =
+      session.files?.[
+        trackId
+      ]?.audio;
+
+
+    if (oldAudio) {
+
+      const oldPath =
+        safeJoin(
+          TRANSFER_DIR,
+          `/${oldAudio}`
+        );
+
+
+      if (
+        oldPath &&
+        oldPath !== filePath
+      ) {
+
+        fs.rmSync(
+          oldPath,
+          {
+            force: true
+          }
+        );
+
+      }
+
+    }
+
+
+    session.files[
+      trackId
+    ] = {
+
+      ...(
+        session.files[
+        trackId
+        ] || {}
+      ),
+
+      audio:
+        fileName,
+
+      audioBytes:
+        audioBuffer.length
+
+    };
+
+
+    session.status =
+      'uploading';
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+    sendJson(
+      res,
+      200,
+      {
+        session:
+          publicSyncSession(
+            session
+          ),
+
+        upload: {
+          trackId,
+
+          bytes:
+            audioBuffer.length
+        }
+      }
+    );
+
+
+    return;
+
+  }
+
+  const syncManifestMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)\/manifest$/
+    );
+
+
+  if (
+    req.method === 'POST' &&
+    syncManifestMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncManifestMatch[1]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const body =
+      await readJsonBody(req);
+
+
+    const tracks =
+      Array.isArray(body.tracks)
+        ? body.tracks
+        : [];
+
+
+    const playlists =
+      Array.isArray(body.playlists)
+        ? body.playlists
+        : [];
+
+
+    /*
+     * 这里只保存元数据。
+     *
+     * 还没有上传 MP3 或封面。
+     */
+    session.manifest = {
+      tracks,
+      playlists
+    };
+
+
+    session.trackCount =
+      tracks.length;
+
+
+    session.playlistCount =
+      playlists.length;
+
+
+    session.status =
+      'manifest-ready';
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+    sendJson(
+      res,
+      200,
+      {
+        session:
+          publicSyncSession(
+            session
+          )
+      }
+    );
+
+
+    return;
+
+  }
+
+  const syncSessionMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)$/
+    );
+
+
+  if (
+    req.method === 'GET' &&
+    syncSessionMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncSessionMatch[1]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    sendJson(
+      res,
+      200,
+      {
+        session:
+          publicSyncSession(
+            session
+          )
+      }
+    );
+
+
+    return;
+
   }
 
 
