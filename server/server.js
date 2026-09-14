@@ -123,6 +123,30 @@ function publicSyncSession(
           Boolean(
             entry?.audio
           )
+      ).length,
+
+    expectedCoverCount:
+      (
+        Array.isArray(
+          session.manifest?.tracks
+        )
+          ? session.manifest.tracks
+          : []
+      ).filter(
+        (track) =>
+          Boolean(
+            track?.hasCover
+          )
+      ).length,
+
+    uploadedCoverCount:
+      Object.values(
+        session.files || {}
+      ).filter(
+        (entry) =>
+          Boolean(
+            entry?.cover
+          )
       ).length
 
   };
@@ -209,6 +233,67 @@ function cleanupSyncSessionFiles(
 
 
   return removedCount;
+
+}
+
+function updateSyncSessionStatus(
+  session
+) {
+
+  const tracks =
+    Array.isArray(
+      session.manifest?.tracks
+    )
+      ? session.manifest.tracks
+      : [];
+
+
+  if (!tracks.length) {
+
+    session.status =
+      'ready';
+
+    return;
+
+  }
+
+
+  const allAudioReady =
+    tracks.every(
+      (track) =>
+        Boolean(
+          session.files?.[
+            String(track.id)
+          ]?.audio
+        )
+    );
+
+
+  const coverTracks =
+    tracks.filter(
+      (track) =>
+        Boolean(
+          track?.hasCover
+        )
+    );
+
+
+  const allCoversReady =
+    coverTracks.every(
+      (track) =>
+        Boolean(
+          session.files?.[
+            String(track.id)
+          ]?.cover
+        )
+    );
+
+
+  session.status =
+    allAudioReady &&
+      allCoversReady
+      ? 'ready'
+      : 'uploading';
 
 }
 
@@ -2122,7 +2207,7 @@ async function handleApi(req, res, url) {
     const session = {
 
       id:
-        makeId('sync'),
+        `sync_${crypto.randomBytes(16).toString('hex')}`,
 
       status:
         'waiting',
@@ -2356,8 +2441,9 @@ async function handleApi(req, res, url) {
     };
 
 
-    session.status =
-      'uploading';
+    updateSyncSessionStatus(
+      session
+    );
 
 
     refreshSyncSessionExpiry(
@@ -2380,6 +2466,521 @@ async function handleApi(req, res, url) {
             audioBuffer.length
         }
       }
+    );
+
+
+    return;
+
+  }
+
+  if (
+    req.method === 'GET' &&
+    syncTrackAudioMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncTrackAudioMatch[1]
+      );
+
+
+    const trackId =
+      decodeURIComponent(
+        syncTrackAudioMatch[2]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const fileName =
+      session.files?.[
+        trackId
+      ]?.audio;
+
+
+    if (!fileName) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '这首歌还没有上传到同步会话'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const filePath =
+      safeJoin(
+        TRANSFER_DIR,
+        `/${fileName}`
+      );
+
+
+    if (
+      !filePath ||
+      !fs.existsSync(
+        filePath
+      )
+    ) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步 MP3 文件不存在'
+        }
+      );
+
+      return;
+
+    }
+
+
+    updateSyncSessionStatus(
+      session
+    );
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+
+    const stat =
+      fs.statSync(
+        filePath
+      );
+
+
+    res.writeHead(
+      200,
+      {
+        'Content-Type':
+          'audio/mpeg',
+
+        'Content-Length':
+          stat.size,
+
+        'Cache-Control':
+          'no-store',
+
+        /*
+         * 这里不能漏。
+         *
+         * 以后 GitHub Pages 上的 iPhone Web
+         * 会跨域读取这个 MP3。
+         */
+        'Access-Control-Allow-Origin':
+          CORS_ORIGIN
+      }
+    );
+
+
+    fs.createReadStream(
+      filePath
+    ).pipe(
+      res
+    );
+
+
+    return;
+
+  }
+
+  const syncTrackCoverMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)\/tracks\/([^/]+)\/cover$/
+    );
+
+
+  /*
+   * Computer Web
+   * → Desktop 临时封面。
+   */
+  if (
+    req.method === 'POST' &&
+    syncTrackCoverMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncTrackCoverMatch[1]
+      );
+
+
+    const trackId =
+      decodeURIComponent(
+        syncTrackCoverMatch[2]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const trackExists =
+      Array.isArray(
+        session.manifest?.tracks
+      ) &&
+      session.manifest.tracks.some(
+        (track) =>
+          String(track?.id) ===
+          trackId
+      );
+
+
+    if (!trackExists) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '这首歌不在当前同步清单中'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const coverBuffer =
+      await readBinaryBody(
+        req,
+        25 * 1024 * 1024
+      );
+
+
+    if (!coverBuffer.length) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '没有收到封面数据'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const contentType =
+      String(
+        req.headers[
+        'content-type'
+        ] || 'image/jpeg'
+      )
+        .split(';')[0]
+        .trim()
+        .toLowerCase();
+
+
+    const extension =
+      contentType === 'image/png'
+        ? 'png'
+        : contentType === 'image/webp'
+          ? 'webp'
+          : contentType === 'image/avif'
+            ? 'avif'
+            : contentType === 'image/gif'
+              ? 'gif'
+              : 'jpg';
+
+
+    const fileName =
+      `${makeId('sync-cover')}.${extension}`;
+
+
+    const filePath =
+      path.join(
+        TRANSFER_DIR,
+        fileName
+      );
+
+
+    fs.writeFileSync(
+      filePath,
+      coverBuffer
+    );
+
+
+    /*
+     * 同一首歌重新上传封面时，
+     * 删除上一份临时文件。
+     */
+    const oldCover =
+      session.files?.[
+        trackId
+      ]?.cover;
+
+
+    if (oldCover) {
+
+      const oldPath =
+        safeJoin(
+          TRANSFER_DIR,
+          `/${oldCover}`
+        );
+
+
+      if (
+        oldPath &&
+        oldPath !== filePath
+      ) {
+
+        fs.rmSync(
+          oldPath,
+          {
+            force: true
+          }
+        );
+
+      }
+
+    }
+
+
+    session.files[
+      trackId
+    ] = {
+
+      ...(
+        session.files[
+        trackId
+        ] || {}
+      ),
+
+      cover:
+        fileName,
+
+      coverBytes:
+        coverBuffer.length,
+
+      coverType:
+        contentType
+
+    };
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+
+    sendJson(
+      res,
+      200,
+      {
+        session:
+          publicSyncSession(
+            session
+          ),
+
+        upload: {
+          trackId,
+
+          bytes:
+            coverBuffer.length,
+
+          contentType
+        }
+      }
+    );
+
+
+    return;
+
+  }
+
+
+  /*
+   * iPhone
+   * ← Desktop 临时封面。
+   */
+  if (
+    req.method === 'GET' &&
+    syncTrackCoverMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncTrackCoverMatch[1]
+      );
+
+
+    const trackId =
+      decodeURIComponent(
+        syncTrackCoverMatch[2]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const fileEntry =
+      session.files?.[
+      trackId
+      ];
+
+
+    const fileName =
+      fileEntry?.cover;
+
+
+    if (!fileName) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '这首歌没有同步封面'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const filePath =
+      safeJoin(
+        TRANSFER_DIR,
+        `/${fileName}`
+      );
+
+
+    if (
+      !filePath ||
+      !fs.existsSync(
+        filePath
+      )
+    ) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步封面文件不存在'
+        }
+      );
+
+      return;
+
+    }
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+
+    const stat =
+      fs.statSync(
+        filePath
+      );
+
+
+    res.writeHead(
+      200,
+      {
+        'Content-Type':
+          fileEntry.coverType ||
+          'image/jpeg',
+
+        'Content-Length':
+          stat.size,
+
+        'Cache-Control':
+          'no-store',
+
+        'Access-Control-Allow-Origin':
+          CORS_ORIGIN
+      }
+    );
+
+
+    fs.createReadStream(
+      filePath
+    ).pipe(
+      res
     );
 
 
@@ -2480,6 +3081,82 @@ async function handleApi(req, res, url) {
           publicSyncSession(
             session
           )
+      }
+    );
+
+
+    return;
+
+  }
+
+  if (
+    req.method === 'GET' &&
+    syncManifestMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncManifestMatch[1]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (!session.manifest) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '同步清单还没有准备完成'
+        }
+      );
+
+      return;
+
+    }
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+
+    sendJson(
+      res,
+      200,
+      {
+        session:
+          publicSyncSession(
+            session
+          ),
+
+        manifest:
+          session.manifest
       }
     );
 
