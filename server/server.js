@@ -39,6 +39,21 @@ const FFMPEG_DIR =
 const COOKIE_BROWSER = process.env.GAMA_MUSIC_COOKIE_BROWSER || 'chrome';
 const CORS_ORIGIN = process.env.GAMA_MUSIC_CORS_ORIGIN || '*';
 
+/*
+ * 共享后台访问密码。
+ *
+ * 开发时留空：
+ * 不启用鉴权。
+ *
+ * 公网运行时设置以后，
+ * Computer Web 必须携带这个密码。
+ */
+const RELAY_ACCESS_KEY =
+  String(
+    process.env.GAMA_MUSIC_RELAY_KEY ||
+    ''
+  ).trim();
+
 const jobs = new Map();
 const favoriteJobs = new Map();
 
@@ -147,7 +162,25 @@ function publicSyncSession(
           Boolean(
             entry?.cover
           )
-      ).length
+      ).length,
+    preparation:
+      session.preparation
+        ? {
+
+          status:
+            session.preparation.status,
+
+          total:
+            session.preparation.total,
+
+          completed:
+            session.preparation.completed,
+
+          failed:
+            session.preparation.failed
+
+        }
+        : null
 
   };
 
@@ -294,6 +327,129 @@ function updateSyncSessionStatus(
       allCoversReady
       ? 'ready'
       : 'uploading';
+
+}
+
+
+function updateMissingSyncStatus(
+  session
+) {
+
+  /*
+   * 手机还没有报告 missing 时，
+   * 保留旧同步逻辑。
+   */
+  if (
+    !session?.missing?.reportedAt
+  ) {
+
+    updateSyncSessionStatus(
+      session
+    );
+
+    return;
+
+  }
+
+
+  const audioTrackIds =
+    Array.isArray(
+      session.missing
+        ?.audioTrackIds
+    )
+      ? session.missing
+        .audioTrackIds
+      : [];
+
+
+  const coverTrackIds =
+    Array.isArray(
+      session.missing
+        ?.coverTrackIds
+    )
+      ? session.missing
+        .coverTrackIds
+      : [];
+
+
+  const allAudioReady =
+    audioTrackIds.every(
+      (trackId) =>
+        Boolean(
+          session.files?.[
+            String(trackId)
+          ]?.audio
+        )
+    );
+
+
+  const allCoversReady =
+    coverTrackIds.every(
+      (trackId) =>
+        Boolean(
+          session.files?.[
+            String(trackId)
+          ]?.cover
+        )
+    );
+
+
+  /*
+   * 手机真正缺的东西全部齐了。
+   */
+  if (
+    allAudioReady &&
+    allCoversReady
+  ) {
+
+    session.status =
+      'missing-ready';
+
+    return;
+
+  }
+
+
+  if (
+    session.preparation
+      ?.status === 'partial'
+  ) {
+
+    /*
+     * Bilibili 下载失败以后，
+     * 先等 Computer Web
+     * 用自己保存的 MP3 / 封面兜底。
+     */
+    session.status =
+      'waiting-web-fallback';
+
+    return;
+
+  }
+
+
+  /*
+   * Bilibili 还在下载。
+   */
+  if (
+    session.preparation
+      ?.status === 'running'
+  ) {
+
+    session.status =
+      'preparing';
+
+    return;
+
+  }
+
+
+  /*
+   * 剩余情况通常就是：
+   * 等 Computer Web 上传本地歌曲。
+   */
+  session.status =
+    'waiting-web-upload';
 
 }
 
@@ -1030,6 +1186,68 @@ function extractBilibiliIdentity(value) {
   return null;
 }
 
+function isBilibiliSyncTrack(
+  track
+) {
+
+  const source =
+    track?.source || {};
+
+
+  const kind =
+    String(
+      source.kind || ''
+    ).toUpperCase();
+
+
+  if (
+    kind === 'BV' ||
+    kind === 'AV'
+  ) {
+
+    return true;
+
+  }
+
+
+  const sourceKey =
+    String(
+      track?.sourceKey ||
+      source.key ||
+      ''
+    ).toLowerCase();
+
+
+  if (
+    sourceKey.startsWith('bv:') ||
+    sourceKey.startsWith('av:')
+  ) {
+
+    return true;
+
+  }
+
+
+  const candidates = [
+    source.canonicalUrl,
+    source.normalizedUrl,
+    source.webpageUrl,
+    source.originalUrl,
+    source.id
+  ].filter(Boolean);
+
+
+  return candidates.some(
+    (value) =>
+      Boolean(
+        extractBilibiliIdentity(
+          value
+        )
+      )
+  );
+
+}
+
 function safeDecodeURIComponent(value) {
   try {
     return decodeURIComponent(value);
@@ -1407,6 +1625,443 @@ async function runDownloadJob(job) {
     job.error = error.message;
     job.updatedAt = nowIso();
   }
+}
+
+function getSyncTrackBilibiliUrl(
+  track
+) {
+
+  const source =
+    track?.source || {};
+
+
+  const candidates = [
+    source.canonicalUrl,
+    source.webpageUrl,
+    source.originalUrl,
+    source.normalizedUrl
+  ];
+
+
+  for (const candidate of candidates) {
+
+    if (
+      typeof candidate === 'string' &&
+      /^https?:\/\//i.test(candidate)
+    ) {
+
+      return candidate;
+
+    }
+
+  }
+
+
+  const identity =
+    extractBilibiliIdentity(
+      source.id ||
+      track?.sourceKey ||
+      source.key ||
+      ''
+    );
+
+
+  return (
+    identity?.canonicalUrl ||
+    ''
+  );
+
+}
+
+
+function syncCoverType(
+  fileName
+) {
+
+  const ext =
+    path.extname(
+      String(fileName || '')
+    ).toLowerCase();
+
+
+  if (ext === '.png') {
+    return 'image/png';
+  }
+
+  if (ext === '.webp') {
+    return 'image/webp';
+  }
+
+  if (ext === '.avif') {
+    return 'image/avif';
+  }
+
+  return 'image/jpeg';
+
+}
+
+
+async function prepareMissingBilibiliAudio(
+  session
+) {
+
+  const audioTrackIds =
+    Array.isArray(
+      session.plan
+        ?.bilibiliAudioTrackIds
+    )
+      ? session.plan
+        .bilibiliAudioTrackIds
+      : [];
+
+
+  const coverTrackIds =
+    Array.isArray(
+      session.plan
+        ?.bilibiliCoverTrackIds
+    )
+      ? session.plan
+        .bilibiliCoverTrackIds
+      : [];
+
+
+  /*
+   * MP3 缺失或者封面缺失，
+   * 都需要 Desktop 去 Bilibili
+   * 准备一次资源。
+   *
+   * Set 防止同一首歌下载两次。
+   */
+  const trackIds =
+    [
+      ...new Set([
+        ...audioTrackIds,
+        ...coverTrackIds
+      ])
+    ];
+
+
+  session.preparation = {
+
+    status:
+      trackIds.length
+        ? 'running'
+        : 'complete',
+
+    total:
+      trackIds.length,
+
+    completed:
+      0,
+
+    failed:
+      0,
+
+    failures:
+      [],
+
+    updatedAt:
+      nowIso()
+
+  };
+
+
+  if (!trackIds.length) {
+
+    updateMissingSyncStatus(
+      session
+    );
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+
+    return;
+
+
+
+  }
+
+
+  const manifestTracks =
+    Array.isArray(
+      session.manifest?.tracks
+    )
+      ? session.manifest.tracks
+      : [];
+
+
+  for (const trackId of trackIds) {
+
+    const track =
+      manifestTracks.find(
+        (item) =>
+          String(item?.id) ===
+          String(trackId)
+      );
+
+
+    try {
+
+      if (!track) {
+
+        throw new Error(
+          '同步清单中找不到歌曲'
+        );
+
+      }
+
+
+      const videoUrl =
+        getSyncTrackBilibiliUrl(
+          track
+        );
+
+
+      if (!videoUrl) {
+
+        throw new Error(
+          '找不到 Bilibili 来源地址'
+        );
+
+      }
+
+
+      console.log(
+        `按需下载手机缺失歌曲：${track.title}`
+      );
+
+
+      const job = {
+
+        id:
+          makeId('sync-job'),
+
+        url:
+          videoUrl,
+
+        title:
+          track.title || '',
+
+        status:
+          'queued',
+
+        stage:
+          '排队中',
+
+        progress:
+          0,
+
+        createdAt:
+          nowIso(),
+
+        updatedAt:
+          nowIso()
+
+      };
+
+
+      await runDownloadJob(
+        job
+      );
+
+
+      if (
+        job.status !== 'complete' ||
+        !job.track?.file
+      ) {
+
+        throw new Error(
+          job.error ||
+          'Bilibili 下载失败'
+        );
+
+      }
+
+
+      const audioPath =
+        safeJoin(
+          TRANSFER_DIR,
+          `/${job.track.file}`
+        );
+
+
+      if (
+        !audioPath ||
+        !fs.existsSync(
+          audioPath
+        )
+      ) {
+
+        throw new Error(
+          '下载完成但找不到 MP3'
+        );
+
+      }
+
+
+      /*
+       * 如果旧同步流程之前已经
+       * 上传过一份 MP3，
+       * 现在用后台重新下载的版本替换。
+       */
+      const oldAudio =
+        session.files?.[
+          trackId
+        ]?.audio;
+
+
+      if (
+        oldAudio &&
+        oldAudio !== job.track.file
+      ) {
+
+        const oldAudioPath =
+          safeJoin(
+            TRANSFER_DIR,
+            `/${oldAudio}`
+          );
+
+
+        if (oldAudioPath) {
+
+          fs.rmSync(
+            oldAudioPath,
+            {
+              force: true
+            }
+          );
+
+        }
+
+      }
+
+
+      session.files[
+        trackId
+      ] = {
+
+        ...(
+          session.files[
+          trackId
+          ] || {}
+        ),
+
+        audio:
+          job.track.file,
+
+        audioBytes:
+          fs.statSync(
+            audioPath
+          ).size
+
+      };
+
+
+      /*
+       * runDownloadJob 本身也会取封面。
+       *
+       * 如果手机正好也缺封面，
+       * 顺便直接使用这一份。
+       */
+      if (
+        session.plan
+          ?.bilibiliCoverTrackIds
+          ?.includes(
+            trackId
+          ) &&
+        job.track.cover
+      ) {
+
+        session.files[
+          trackId
+        ].cover =
+          job.track.cover;
+
+        session.files[
+          trackId
+        ].coverType =
+          syncCoverType(
+            job.track.cover
+          );
+
+      }
+
+
+      session.preparation
+        .completed += 1;
+
+
+      console.log(
+        `手机缺失歌曲准备完成：${track.title}`
+      );
+
+    } catch (error) {
+
+      session.preparation
+        .failed += 1;
+
+
+      session.preparation
+        .failures.push({
+
+          trackId,
+
+          error:
+            error.message ||
+            '未知错误'
+
+        });
+
+
+      console.warn(
+        `手机缺失歌曲准备失败 ${trackId}:`,
+        error.message
+      );
+
+    }
+
+
+    session.preparation
+      .updatedAt =
+      nowIso();
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+  }
+
+
+  session.preparation.status =
+    session.preparation.failed
+      ? 'partial'
+      : 'complete';
+
+
+  const waitingForWeb =
+    Boolean(
+      session.plan
+        ?.localAudioTrackIds
+        ?.length ||
+      session.plan
+        ?.localCoverTrackIds
+        ?.length
+    );
+
+
+  updateMissingSyncStatus(
+    session
+  );
+
+
+  refreshSyncSessionExpiry(
+    session
+  );
+
 }
 
 function publicFavoriteJob(job) {
@@ -1934,6 +2589,116 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function hasRelayAccess(
+  req
+) {
+
+  /*
+   * 没有配置密码时，
+   * 保持现在的开发模式行为。
+   */
+  if (!RELAY_ACCESS_KEY) {
+    return true;
+  }
+
+
+  const authorization =
+    String(
+      req.headers.authorization ||
+      ''
+    ).trim();
+
+
+  return (
+    authorization ===
+    `Bearer ${RELAY_ACCESS_KEY}`
+  );
+
+}
+
+
+function requireRelayAccess(
+  req,
+  res
+) {
+
+  if (
+    hasRelayAccess(
+      req
+    )
+  ) {
+
+    return true;
+
+  }
+
+
+  sendJson(
+    res,
+    401,
+    {
+      error:
+        '没有后台访问权限'
+    }
+  );
+
+
+  return false;
+
+}
+
+/*
+ * 手机端只凭随机同步 session
+ * 下载自己的同步内容。
+ *
+ * 不把共享后台密码放进二维码。
+ */
+function isPublicSyncRead(
+  req,
+  pathname
+) {
+
+
+  if (
+    req.method === 'POST' &&
+    (
+      /^\/api\/sync\/sessions\/sync_[0-9a-f]{32}\/missing$/i
+        .test(pathname) ||
+
+      /^\/api\/sync\/sessions\/sync_[0-9a-f]{32}\/complete$/i
+        .test(pathname)
+    )
+  ) {
+
+    return true;
+
+  }
+
+  if (
+    req.method !== 'GET'
+  ) {
+
+    return false;
+
+  }
+
+
+  return (
+    /^\/api\/sync\/sessions\/[^/]+$/
+      .test(pathname) ||
+
+    /^\/api\/sync\/sessions\/[^/]+\/manifest$/
+      .test(pathname) ||
+
+    /^\/api\/sync\/sessions\/[^/]+\/tracks\/[^/]+\/audio$/
+      .test(pathname) ||
+
+    /^\/api\/sync\/sessions\/[^/]+\/tracks\/[^/]+\/cover$/
+      .test(pathname)
+  );
+
+}
+
 function readBinaryBody(
   req,
   maxBytes =
@@ -2182,6 +2947,30 @@ async function handleApi(req, res, url) {
     });
     return;
   }
+  /*
+ * health 可以公开访问。
+ *
+ * 手机读取某个随机同步 session
+ * 也不要求共享密码。
+ *
+ * 其余后台能力：
+ * B站下载、创建同步、
+ * 上传 MP3 等都必须鉴权。
+ */
+  if (
+    !isPublicSyncRead(
+      req,
+      url.pathname
+    ) &&
+    !requireRelayAccess(
+      req,
+      res
+    )
+  ) {
+
+    return;
+
+  }
 
   if (
     req.method === 'POST' &&
@@ -2223,6 +3012,23 @@ async function handleApi(req, res, url) {
 
       files:
         {},
+      claimedByClientId:
+        null,
+
+      claimedAt:
+        null,
+
+      missing: {
+        audioTrackIds: [],
+        coverTrackIds: [],
+        reportedAt: null
+      },
+
+      plan:
+        null,
+
+      preparation:
+        null,
 
       createdAt:
         new Date(
@@ -2441,7 +3247,7 @@ async function handleApi(req, res, url) {
     };
 
 
-    updateSyncSessionStatus(
+    updateMissingSyncStatus(
       session
     );
 
@@ -2507,6 +3313,49 @@ async function handleApi(req, res, url) {
         {
           error:
             '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+    const clientId =
+      String(
+        url.searchParams.get(
+          'clientId'
+        ) || ''
+      ).trim();
+
+
+    if (!clientId) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '缺少手机同步身份'
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (
+      !session.claimedByClientId ||
+      session.claimedByClientId !==
+      clientId
+    ) {
+
+      sendJson(
+        res,
+        403,
+        {
+          error:
+            '无权下载这个同步会话的文件'
         }
       );
 
@@ -2892,6 +3741,49 @@ async function handleApi(req, res, url) {
 
     }
 
+    const clientId =
+      String(
+        url.searchParams.get(
+          'clientId'
+        ) || ''
+      ).trim();
+
+
+    if (!clientId) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '缺少手机同步身份'
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (
+      !session.claimedByClientId ||
+      session.claimedByClientId !==
+      clientId
+    ) {
+
+      sendJson(
+        res,
+        403,
+        {
+          error:
+            '无权下载这个同步会话的文件'
+        }
+      );
+
+      return;
+
+    }
+
 
     const fileEntry =
       session.files?.[
@@ -2946,6 +3838,10 @@ async function handleApi(req, res, url) {
 
     }
 
+    updateMissingSyncStatus(
+      session
+    );
+
 
     refreshSyncSessionExpiry(
       session
@@ -2981,6 +3877,779 @@ async function handleApi(req, res, url) {
       filePath
     ).pipe(
       res
+    );
+
+
+    return;
+
+  }
+
+  const syncMissingMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)\/missing$/
+    );
+
+
+  if (
+    req.method === 'POST' &&
+    syncMissingMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncMissingMatch[1]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (!session.manifest) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '同步清单还没有准备完成'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const body =
+      await readJsonBody(req);
+    const clientId =
+      String(
+        body?.clientId || ''
+      ).trim();
+
+
+    if (!clientId) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '缺少手机同步身份'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * 第一个真正扫码并报告 missing 的手机，
+     * 获得这个同步 session。
+     */
+    if (
+      !session.claimedByClientId
+    ) {
+
+      session.claimedByClientId =
+        clientId;
+
+      session.claimedAt =
+        nowIso();
+
+    }
+
+
+    /*
+     * 后面的请求必须来自同一台手机。
+     */
+    if (
+      session.claimedByClientId !==
+      clientId
+    ) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '这个同步二维码已经被另一台手机使用'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * 只接受 manifest 中真实存在的歌曲，
+     * 防止客户端随便提交 trackId。
+     */
+    const manifestTracks =
+      Array.isArray(
+        session.manifest.tracks
+      )
+        ? session.manifest.tracks
+        : [];
+
+
+    const validTrackIds =
+      new Set(
+        manifestTracks.map(
+          (track) =>
+            String(track.id)
+        )
+      );
+
+
+    const coverTrackIds =
+      new Set(
+        manifestTracks
+          .filter(
+            (track) =>
+              track.hasCover
+          )
+          .map(
+            (track) =>
+              String(track.id)
+          )
+      );
+
+
+    const normalizeIds =
+      (
+        values,
+        allowedIds
+      ) => {
+
+        if (!Array.isArray(values)) {
+          return [];
+        }
+
+
+        return [
+          ...new Set(
+            values
+              .map(
+                (value) =>
+                  String(value)
+              )
+              .filter(
+                (trackId) =>
+                  allowedIds.has(
+                    trackId
+                  )
+              )
+          )
+        ];
+
+      };
+
+
+    const missingAudioTrackIds =
+      normalizeIds(
+        body.audioTrackIds,
+        validTrackIds
+      );
+
+
+    const missingCoverTrackIds =
+      normalizeIds(
+        body.coverTrackIds,
+        coverTrackIds
+      );
+    /*
+ * 根据 manifest 找到完整歌曲信息。
+ */
+    const trackById =
+      new Map(
+        manifestTracks.map(
+          (track) => [
+            String(track.id),
+            track
+          ]
+        )
+      );
+
+
+    /*
+     * 把缺失资源分成：
+     *
+     * Bilibili：
+     * Desktop 以后可以自己重新下载。
+     *
+     * local：
+     * Desktop 没有网络来源，
+     * 以后需要 Computer Web 上传。
+     */
+    const classifyTrackIds =
+      (trackIds) => {
+
+        const bilibiliTrackIds =
+          [];
+
+        const localTrackIds =
+          [];
+
+
+        for (
+          const trackId of trackIds
+        ) {
+
+          const track =
+            trackById.get(
+              trackId
+            );
+
+
+          if (
+            isBilibiliSyncTrack(
+              track
+            )
+          ) {
+
+            bilibiliTrackIds.push(
+              trackId
+            );
+
+          } else {
+
+            localTrackIds.push(
+              trackId
+            );
+
+          }
+
+        }
+
+
+        return {
+          bilibiliTrackIds,
+          localTrackIds
+        };
+
+      };
+
+
+    const audioPlan =
+      classifyTrackIds(
+        missingAudioTrackIds
+      );
+
+
+    const coverPlan =
+      classifyTrackIds(
+        missingCoverTrackIds
+      );
+
+
+    const syncPlan = {
+
+      bilibiliAudioTrackIds:
+        audioPlan.bilibiliTrackIds,
+
+      localAudioTrackIds:
+        audioPlan.localTrackIds,
+
+      bilibiliCoverTrackIds:
+        coverPlan.bilibiliTrackIds,
+
+      localCoverTrackIds:
+        coverPlan.localTrackIds
+
+    };
+
+
+    session.missing = {
+
+      audioTrackIds:
+        missingAudioTrackIds,
+
+      coverTrackIds:
+        missingCoverTrackIds,
+
+      reportedAt:
+        nowIso()
+
+    };
+
+    session.plan =
+      syncPlan;
+
+
+    console.log(
+      `手机同步缺失计划 ${session.id}: ` +
+      `B站 MP3 ${syncPlan.bilibiliAudioTrackIds.length}, ` +
+      `本地 MP3 ${syncPlan.localAudioTrackIds.length}, ` +
+      `B站封面 ${syncPlan.bilibiliCoverTrackIds.length}, ` +
+      `本地封面 ${syncPlan.localCoverTrackIds.length}`
+    );
+
+
+    /*
+     * 现在只是记录“手机缺什么”。
+     *
+     * 下一阶段再根据来源决定：
+     * - Bilibili → 后台下载
+     * - local → 等待 Web 上传
+     */
+    session.status =
+      'missing-reported';
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+
+    sendJson(
+      res,
+      200,
+      {
+        session:
+          publicSyncSession(
+            session
+          ),
+
+        missing: {
+          audioTrackIds:
+            missingAudioTrackIds,
+
+          coverTrackIds:
+            missingCoverTrackIds
+        },
+
+        plan:
+          syncPlan
+      }
+    );
+
+
+    /*
+     * HTTP 先立即回复手机。
+     *
+     * Bilibili 下载在后台继续进行，
+     * 不让这个 POST 一直卡住。
+     */
+    prepareMissingBilibiliAudio(
+      session
+    ).catch(
+      (error) => {
+
+        console.error(
+          `手机同步准备任务失败 ${session.id}:`,
+          error
+        );
+
+
+        session.status =
+          'missing-partial';
+
+
+        if (session.preparation) {
+
+          session.preparation.status =
+            'partial';
+
+        }
+
+
+        refreshSyncSessionExpiry(
+          session
+        );
+
+      }
+    );
+
+
+    return;
+
+  }
+
+  /*
+ * Computer Web 查询手机同步计划。
+ *
+ * 这个接口不是公开接口，
+ * 所以仍然需要后台访问密码。
+ */
+  const syncPlanMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)\/plan$/
+    );
+
+
+  if (
+    req.method === 'GET' &&
+    syncPlanMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncPlanMatch[1]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      /*
+ * Bilibili 下载失败的歌曲，
+ * 下一步交给 Computer Web
+ * 从 IndexedDB 上传兜底。
+ */
+      const failedTrackIds =
+        new Set(
+          (
+            Array.isArray(
+              session.preparation
+                ?.failures
+            )
+              ? session.preparation
+                .failures
+              : []
+          )
+            .map(
+              (item) =>
+                String(
+                  item?.trackId || ''
+                )
+            )
+            .filter(Boolean)
+        );
+
+
+      const bilibiliAudioTrackIds =
+        Array.isArray(
+          session.plan
+            ?.bilibiliAudioTrackIds
+        )
+          ? session.plan
+            .bilibiliAudioTrackIds
+          : [];
+
+
+      const bilibiliCoverTrackIds =
+        Array.isArray(
+          session.plan
+            ?.bilibiliCoverTrackIds
+        )
+          ? session.plan
+            .bilibiliCoverTrackIds
+          : [];
+
+
+      const fallbackAudioTrackIds =
+        bilibiliAudioTrackIds
+          .map(String)
+          .filter(
+            (trackId) =>
+              failedTrackIds.has(
+                trackId
+              )
+          );
+
+
+      const fallbackCoverTrackIds =
+        bilibiliCoverTrackIds
+          .map(String)
+          .filter(
+            (trackId) =>
+              failedTrackIds.has(
+                trackId
+              )
+          );
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    sendJson(
+      res,
+      200,
+      {
+        session:
+          publicSyncSession(
+            session
+          ),
+
+        missing:
+          session.missing || {
+            audioTrackIds: [],
+            coverTrackIds: [],
+            reportedAt: null
+          },
+
+        plan:
+          session.plan || {
+            bilibiliAudioTrackIds: [],
+            localAudioTrackIds: [],
+            bilibiliCoverTrackIds: [],
+            localCoverTrackIds: [],
+            fallback: {
+              audioTrackIds:
+                fallbackAudioTrackIds,
+
+              coverTrackIds:
+                fallbackCoverTrackIds
+            }
+          }
+      }
+    );
+
+
+    return;
+
+  }
+
+  const syncCompleteMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)\/complete$/
+    );
+
+
+  if (
+    req.method === 'POST' &&
+    syncCompleteMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncCompleteMatch[1]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+    const body =
+      await readJsonBody(req);
+
+
+    const clientId =
+      String(
+        body?.clientId || ''
+      ).trim();
+
+
+    if (!clientId) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '缺少手机同步身份'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * /missing 已经把 session
+     * 锁定给第一台手机。
+     *
+     * /complete 必须来自同一台手机。
+     */
+    if (
+      !session.claimedByClientId
+    ) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '这个同步会话还没有被手机领取'
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (
+      session.claimedByClientId !==
+      clientId
+    ) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '这个同步二维码属于另一台手机'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * 重复 ACK 也算成功。
+     *
+     * 避免手机因为网络重试
+     * 得到奇怪的错误。
+     */
+    if (
+      session.status ===
+      'completed'
+    ) {
+
+      sendJson(
+        res,
+        200,
+        {
+          session:
+            publicSyncSession(
+              session
+            ),
+
+          removedFiles:
+            0
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * 手机只能在所有缺失资源
+     * 都已经准备好以后确认完成。
+     */
+    if (
+      session.status !==
+      'missing-ready'
+    ) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '同步文件还没有全部准备完成'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const removedFiles =
+      cleanupSyncSessionFiles(
+        session
+      );
+
+
+    /*
+     * 文件已经不存在，
+     * 清空引用，避免后面误以为
+     * session 里还有媒体文件。
+     */
+    session.files = {};
+
+
+    session.status =
+      'completed';
+
+
+    session.completedAt =
+      nowIso();
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+
+    console.log(
+      `手机同步完成 ${session.id}，已清理 ${removedFiles} 个临时文件`
+    );
+
+
+    sendJson(
+      res,
+      200,
+      {
+        session:
+          publicSyncSession(
+            session
+          ),
+
+        completedAt:
+          session.completedAt,
+
+        removedFiles
+      }
     );
 
 
