@@ -536,6 +536,248 @@ function startAccessClientsRefresh() {
 
 }
 
+function startServerLogsRefresh() {
+
+    /*
+     * 控制面板打开时，
+     * 每 10 秒自动刷新一次最新日志。
+     */
+    window.setInterval(
+        () => {
+
+            if (document.hidden) {
+                return;
+            }
+
+
+            refreshServerLogs();
+
+        },
+        10000
+    );
+
+
+    /*
+     * 从后台重新打开控制面板时，
+     * 立即刷新日志。
+     */
+    document.addEventListener(
+        'visibilitychange',
+        () => {
+
+            if (!document.hidden) {
+
+                refreshServerLogs();
+
+            }
+
+        }
+    );
+
+}
+
+function parseServerLogLine(
+    line
+) {
+
+    const match =
+        String(line || '')
+            .match(
+                /^\[([^\]]+)\]\s+\[([^\]]+)\]\s*(.*)$/
+            );
+
+
+    if (!match) {
+
+        return {
+            time: '',
+            level: '',
+            message:
+                String(line || '')
+        };
+
+    }
+
+
+    const date =
+        new Date(
+            match[1]
+        );
+
+
+    const time =
+        Number.isNaN(
+            date.getTime()
+        )
+            ? match[1]
+            : date.toLocaleTimeString(
+                [],
+                {
+                    hour:
+                        '2-digit',
+                    minute:
+                        '2-digit',
+                    second:
+                        '2-digit'
+                }
+            );
+
+
+    return {
+        time,
+        level:
+            match[2],
+        message:
+            match[3]
+    };
+
+}
+
+
+async function refreshServerLogs() {
+
+    const list =
+        $('#serverLogList');
+
+
+    try {
+
+        const lines =
+            await window
+                .gamaDesktop
+                .getServerLogs();
+
+
+        list.replaceChildren();
+
+
+        if (!lines.length) {
+
+            const empty =
+                document.createElement(
+                    'div'
+                );
+
+            empty.className =
+                'muted';
+
+            empty.textContent =
+                '暂时还没有日志';
+
+            list.appendChild(
+                empty
+            );
+
+            return;
+
+        }
+
+
+        for (
+            const line
+            of lines
+        ) {
+
+            const parsed =
+                parseServerLogLine(
+                    line
+                );
+
+
+            const row =
+                document.createElement(
+                    'div'
+                );
+
+            row.className =
+                'server-log-line';
+
+
+            const time =
+                document.createElement(
+                    'span'
+                );
+
+            time.className =
+                'server-log-time';
+
+            time.textContent =
+                parsed.time;
+
+
+            const level =
+                document.createElement(
+                    'span'
+                );
+
+            level.className =
+                'server-log-level';
+
+
+            if (
+                parsed.level ===
+                'WARN'
+            ) {
+                level.classList.add(
+                    'warn'
+                );
+            }
+
+
+            if (
+                parsed.level ===
+                'ERROR'
+            ) {
+                level.classList.add(
+                    'error'
+                );
+            }
+
+
+            level.textContent =
+                parsed.level;
+
+
+            const message =
+                document.createElement(
+                    'span'
+                );
+
+            message.textContent =
+                parsed.message;
+
+
+            row.append(
+                time,
+                level,
+                message
+            );
+
+
+            list.appendChild(
+                row
+            );
+
+        }
+
+
+        /*
+         * 最新日志在最下面，
+         * 每次刷新自动滚到底部。
+         */
+        list.scrollTop =
+            list.scrollHeight;
+
+    } catch (error) {
+
+        list.textContent =
+            error?.message ||
+            '读取日志失败';
+
+    }
+
+}
+
 async function init() {
 
     connectionInfo =
@@ -577,6 +819,38 @@ async function init() {
         )
     );
 
+    $('#refreshAccessClientsButton')
+        .addEventListener(
+            'click',
+            async () => {
+
+                const button =
+                    $('#refreshAccessClientsButton');
+
+
+                button.disabled =
+                    true;
+
+                button.textContent =
+                    '↻';
+
+
+                try {
+
+                    await refreshAccessClients();
+
+                } finally {
+
+                    button.disabled =
+                        false;
+
+                    button.textContent =
+                        '↻';
+                }
+
+            }
+        );
+
     $('#createInviteButton')
         .addEventListener(
             'click',
@@ -604,6 +878,50 @@ async function init() {
             }
         );
 
+    $('#refreshServerLogsButton')
+        .addEventListener(
+            'click',
+            async () => {
+
+                const button =
+                    $('#refreshServerLogsButton');
+
+
+                button.disabled =
+                    true;
+
+
+                try {
+
+                    await refreshServerLogs();
+
+    startServerLogsRefresh();
+
+                } finally {
+
+                    button.disabled =
+                        false;
+
+                }
+
+            }
+        );
+
+
+    $('#openLogFolderButton')
+        .addEventListener(
+            'click',
+            () => {
+
+                window
+                    .gamaDesktop
+                    .openLogFolder();
+
+            }
+        );
+
+
+
 
     $('#openDataButton')
         .addEventListener(
@@ -621,6 +939,10 @@ async function init() {
     await refreshServerStatus();
 
     await refreshAccessClients();
+
+    startAccessClientsRefresh();
+
+    await refreshServerLogs();
 }
 
 

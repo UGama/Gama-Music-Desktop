@@ -120,15 +120,24 @@
 
             <div class="access-clients">
 
-                <div class="access-clients-heading">
-                    已授权设备
-                </div>
+                <div class="access-clients-header">
 
-                <div id="accessClientsList" class="access-clients-list">
-                    <div class="muted">
-                        正在读取……
+                    <div class="access-clients-heading">
+                        已授权设备
                     </div>
+
+                    <button id="refreshAccessClientsButton" class="access-clients-refresh" type="button"
+                        aria-label="刷新设备" title="刷新设备">
+                        ↻
+                    </button>
+
+            </div>
+
+            <div id="accessClientsList" class="access-clients-list">
+                <div class="muted">
+                    正在读取……
                 </div>
+            </div>
 
             </div>
         </section>
@@ -205,6 +214,48 @@
 
             <button id="openDataButton" class="secondary-button">
                 在 Finder 中打开
+            </button>
+
+        </section>
+
+
+        <section class="card">
+
+            <div class="server-log-header">
+
+                <div class="card-heading">
+                    Server 日志
+                </div>
+
+                <button
+                    id="refreshServerLogsButton"
+                    class="access-clients-refresh"
+                    type="button"
+                    aria-label="刷新日志"
+                    title="刷新日志"
+                >
+                    ↻
+                </button>
+
+            </div>
+
+
+            <div
+                id="serverLogList"
+                class="server-log-list"
+            >
+                <div class="muted">
+                    正在读取日志……
+                </div>
+            </div>
+
+
+            <button
+                id="openLogFolderButton"
+                class="secondary-button"
+                type="button"
+            >
+                在 Finder 中打开日志文件夹
             </button>
 
         </section>

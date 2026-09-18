@@ -36,6 +36,21 @@ contextBridge.exposeInMainWorld(
       );
     },
 
+    getServerLogs() {
+      return ipcRenderer.invoke(
+        'desktop:get-server-logs'
+      );
+    },
+
+
+    openLogFolder() {
+      return ipcRenderer.invoke(
+        'desktop:open-log-folder'
+      );
+    },
+
+
+
     openDataFolder() {
       return ipcRenderer.invoke(
         'desktop:open-data-folder'

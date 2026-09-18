@@ -321,11 +321,58 @@ button {
 }
 
 
-.access-clients-heading {
-    margin-bottom: 8px;
+.access-clients-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
 
+    margin-bottom: 8px;
+}
+
+
+.access-clients-heading {
     font-size: 13px;
     font-weight: 750;
+}
+
+
+.access-clients-refresh {
+    display: grid;
+    place-items: center;
+
+    width: 32px;
+    height: 32px;
+
+    margin: 0;
+    padding: 0;
+
+    border:
+        1px solid rgba(33, 134, 84, 0.18);
+
+    border-radius: 50%;
+
+    color: #218654;
+
+    background:
+        rgba(33, 134, 84, 0.08);
+
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+
+.access-clients-refresh:hover {
+    background:
+        rgba(33, 134, 84, 0.14);
+}
+
+
+.access-clients-refresh:disabled {
+    opacity: 0.45;
+
+    cursor: default;
 }
 
 
@@ -395,6 +442,85 @@ button {
     color: #737d90;
 
     font-size: 12px;
+}
+
+.server-log-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+
+    margin-bottom: 10px;
+}
+
+
+.server-log-header .card-heading {
+    margin-bottom: 0;
+}
+
+
+.server-log-list {
+    overflow: auto;
+
+    max-height: 280px;
+
+    padding:
+        10px 12px;
+
+    border:
+        1px solid #edf0f5;
+
+    border-radius: 9px;
+
+    background: #f6f8fb;
+
+    font-family:
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        monospace;
+
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+
+.server-log-line {
+    padding:
+        3px 0;
+
+    border-bottom:
+        1px solid rgba(225, 230, 239, 0.65);
+
+    overflow-wrap: anywhere;
+}
+
+
+.server-log-line:last-child {
+    border-bottom: 0;
+}
+
+
+.server-log-time {
+    color: #737d90;
+}
+
+
+.server-log-level {
+    margin:
+        0 5px;
+
+    font-weight: 700;
+}
+
+
+.server-log-level.warn {
+    color: #a56a19;
+}
+
+
+.server-log-level.error {
+    color: #c54040;
 }
 
 footer {

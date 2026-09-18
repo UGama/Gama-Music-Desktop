@@ -4,6 +4,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const os = require('os');
+const util = require('util');
 const crypto = require('crypto');
 
 const {
@@ -16,6 +17,17 @@ const {
   nativeImage
 } = require('electron');
 
+/*
+ * 单个 Server 日志最多约 5 MB。
+ *
+ * 超过以后：
+ * server.log
+ * → server-old.log
+ *
+ * 然后重新创建新的 server.log。
+ */
+const SERVER_LOG_MAX_SIZE_BYTES =
+  5 * 1024 * 1024;
 
 const PORT = 7330;
 
@@ -41,6 +53,216 @@ function getStorageDir() {
   );
 }
 
+/*
+ * Server 日志目录。
+ */
+function getLogDir() {
+
+  return path.join(
+    getStorageDir(),
+    'logs'
+  );
+
+}
+
+
+/*
+ * 当前 Server 日志文件。
+ */
+function getServerLogPath() {
+
+  return path.join(
+    getLogDir(),
+    'server.log'
+  );
+
+}
+
+/*
+ * 日志过大时做一次简单轮转。
+ *
+ * 最多保留：
+ * - server.log
+ * - server-old.log
+ */
+function rotateServerLogIfNeeded() {
+
+  const logPath =
+    getServerLogPath();
+
+
+  if (
+    !fs.existsSync(
+      logPath
+    )
+  ) {
+    return;
+  }
+
+
+  const stat =
+    fs.statSync(
+      logPath
+    );
+
+
+  if (
+    stat.size <
+    SERVER_LOG_MAX_SIZE_BYTES
+  ) {
+    return;
+  }
+
+
+  const oldLogPath =
+    path.join(
+      getLogDir(),
+      'server-old.log'
+    );
+
+
+  /*
+   * 只保留一份旧日志，
+   * 防止日志无限增长。
+   */
+  fs.rmSync(
+    oldLogPath,
+    {
+      force: true
+    }
+  );
+
+
+  fs.renameSync(
+    logPath,
+    oldLogPath
+  );
+
+}
+
+/*
+ * 把一条日志追加到磁盘。
+ */
+function appendServerLog(
+  level,
+  args
+) {
+
+  try {
+
+    const logDir =
+      getLogDir();
+
+    fs.mkdirSync(
+      logDir,
+      {
+        recursive: true
+      }
+    );
+
+
+    rotateServerLogIfNeeded();
+
+
+    const message =
+      util.format(
+        ...args
+      );
+
+
+    const line =
+      `[${new Date().toISOString()}] ` +
+      `[${level}] ` +
+      `${message}\n`;
+
+
+    fs.appendFileSync(
+      getServerLogPath(),
+      line,
+      'utf8'
+    );
+
+  } catch {
+    /*
+     * 日志写入失败不能影响 Server 本身。
+     */
+  }
+
+}
+
+
+/*
+ * Main Process 和 server.js 共用 console，
+ * 所以在这里安装一次即可。
+ */
+function installFileLogging() {
+
+  const originalLog =
+    console.log.bind(
+      console
+    );
+
+  const originalWarn =
+    console.warn.bind(
+      console
+    );
+
+  const originalError =
+    console.error.bind(
+      console
+    );
+
+
+  console.log =
+    (...args) => {
+
+      originalLog(
+        ...args
+      );
+
+      appendServerLog(
+        'INFO',
+        args
+      );
+
+    };
+
+
+  console.warn =
+    (...args) => {
+
+      originalWarn(
+        ...args
+      );
+
+      appendServerLog(
+        'WARN',
+        args
+      );
+
+    };
+
+
+  console.error =
+    (...args) => {
+
+      originalError(
+        ...args
+      );
+
+      appendServerLog(
+        'ERROR',
+        args
+      );
+
+    };
+
+
+  console.log(
+    'Gama Music logging started'
+  );
+
+}
 
 /*
  * 找 Mac 局域网 IPv4。
@@ -954,6 +1176,88 @@ app.whenReady()
     );
 
     /*
+ * 读取最新 Server 日志。
+ *
+ * 控制面板只显示最后 15 条，
+ * 完整日志仍保留在 server.log。
+ */
+    ipcMain.handle(
+      'desktop:get-server-logs',
+      async () => {
+
+        const logPath =
+          getServerLogPath();
+
+
+        if (
+          !fs.existsSync(
+            logPath
+          )
+        ) {
+          return [];
+        }
+
+
+        try {
+
+          const content =
+            fs.readFileSync(
+              logPath,
+              'utf8'
+            );
+
+
+          return content
+            .split(/\r?\n/)
+            .filter(
+              (line) =>
+                line.trim()
+            )
+            .slice(-15);
+
+        } catch (error) {
+
+          console.error(
+            '读取 Server 日志失败：',
+            error
+          );
+
+          return [];
+
+        }
+
+      }
+    );
+
+
+    /*
+     * 在 Finder 中打开日志文件夹。
+     */
+    ipcMain.handle(
+      'desktop:open-log-folder',
+      async () => {
+
+        const logDir =
+          getLogDir();
+
+
+        fs.mkdirSync(
+          logDir,
+          {
+            recursive: true
+          }
+        );
+
+
+        return shell.openPath(
+          logDir
+        );
+
+      }
+    );
+
+
+    /*
      * Finder 打开数据目录。
      */
     ipcMain.handle(
@@ -982,6 +1286,8 @@ app.whenReady()
       }
     );
 
+
+    installFileLogging();
 
     startGamaServer();
 
