@@ -261,6 +261,141 @@ button {
     font-size: 12px;
 }
 
+.invite-panel {
+    margin-top: 12px;
+
+    padding: 12px;
+
+    border-radius: 10px;
+
+    background: #f6f8fb;
+}
+
+
+.invite-code-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+
+.invite-code {
+    flex: 1;
+
+    font-size: 18px;
+    font-weight: 750;
+    letter-spacing: 1px;
+}
+
+
+.invite-copy-button {
+    width: auto;
+
+    margin-top: 0;
+
+    padding:
+        8px 13px;
+}
+
+
+.invite-expiry {
+    margin-top: 8px;
+}
+
+
+.invite-error {
+    margin-top: 10px;
+
+    color: #c54040;
+
+    font-size: 13px;
+}
+
+.access-clients {
+    margin-top: 18px;
+
+    padding-top: 14px;
+
+    border-top:
+        1px solid #edf0f5;
+}
+
+
+.access-clients-heading {
+    margin-bottom: 8px;
+
+    font-size: 13px;
+    font-weight: 750;
+}
+
+
+.access-client {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+
+    padding:
+        9px 0;
+
+    border-bottom:
+        1px solid #edf0f5;
+}
+
+
+.access-client-info {
+    min-width: 0;
+    flex: 1;
+}
+
+
+.access-client-revoke {
+    width: auto;
+
+    margin-top: 0;
+
+    padding:
+        7px 11px;
+
+    border:
+        1px solid #e2bcbc;
+
+    color: #b13b3b;
+
+    background: #fff8f8;
+}
+
+
+.access-client-revoke:hover {
+    background: #fdeeee;
+}
+
+
+.access-client-revoke:disabled {
+    opacity: 0.55;
+
+    cursor: default;
+}
+
+
+.access-client:last-child {
+    border-bottom: 0;
+}
+
+
+.access-client-name {
+    font-size: 14px;
+    font-weight: 650;
+}
+
+
+.access-client-meta {
+    margin-top: 3px;
+
+    color: #737d90;
+
+    font-size: 12px;
+}
 
 footer {
     padding:

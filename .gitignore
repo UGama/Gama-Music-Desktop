@@ -22,3 +22,10 @@ release/
 npm-debug.log*
 
 vendor/
+
+# Gama Music runtime / secrets
+access-clients.json
+access-clients.json.tmp
+relay-admin-key.txt
+.env
+.env.*

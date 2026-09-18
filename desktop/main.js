@@ -1,8 +1,10 @@
 'use strict';
 
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const {
   app,
@@ -155,6 +157,96 @@ function getToolInfo() {
 
 
 /*
+ * 取得 Desktop 后台管理员密钥。
+ *
+ * 如果启动 App 时已经通过环境变量提供，
+ * 就继续使用原来的。
+ *
+ * 否则第一次自动生成一份，
+ * 保存到 Gama Music 数据目录。
+ */
+function getOrCreateRelayAccessKey() {
+
+  const environmentKey =
+    String(
+      process.env
+        .GAMA_MUSIC_RELAY_KEY ||
+      ''
+    ).trim();
+
+  if (environmentKey) {
+    return environmentKey;
+  }
+
+
+  const storageDir =
+    getStorageDir();
+
+  fs.mkdirSync(
+    storageDir,
+    {
+      recursive: true
+    }
+  );
+
+
+  const keyPath =
+    path.join(
+      storageDir,
+      'relay-admin-key.txt'
+    );
+
+
+  try {
+
+    const savedKey =
+      fs.readFileSync(
+        keyPath,
+        'utf8'
+      ).trim();
+
+    if (savedKey) {
+      return savedKey;
+    }
+
+  } catch (error) {
+
+    if (
+      error.code !== 'ENOENT'
+    ) {
+
+      console.warn(
+        '读取管理员密钥失败：',
+        error.message
+      );
+
+    }
+
+  }
+
+
+  const newKey =
+    crypto
+      .randomBytes(32)
+      .toString('hex');
+
+
+  fs.writeFileSync(
+    keyPath,
+    newKey,
+    {
+      encoding: 'utf8',
+      mode: 0o600
+    }
+  );
+
+
+  return newKey;
+
+}
+
+
+/*
  * 启动 Gama Music Server。
  */
 function startGamaServer() {
@@ -176,6 +268,15 @@ function startGamaServer() {
 
   process.env.GAMA_MUSIC_FFMPEG_DIR =
     vendorDir;
+
+  /*
+* 后台管理员密钥只存在 Main Process
+* 和 Server 中。
+*
+* 不发送给网页，也不发送给 Renderer。
+*/
+  process.env.GAMA_MUSIC_RELAY_KEY =
+    getOrCreateRelayAccessKey();
 
 
   console.log(
@@ -467,6 +568,390 @@ app.whenReady()
       }
     );
 
+
+    /*
+ * 为朋友生成一次性邀请码。
+ *
+ * 管理员密钥只在 Main Process 使用，
+ * 不发送给 Renderer。
+ */
+    ipcMain.handle(
+      'desktop:create-access-invite',
+      async () => {
+
+        const relayKey =
+          String(
+            process.env
+              .GAMA_MUSIC_RELAY_KEY ||
+            ''
+          ).trim();
+
+        if (!relayKey) {
+          throw new Error(
+            '后台管理员密钥不可用'
+          );
+        }
+
+
+        return new Promise(
+          (resolve, reject) => {
+
+            const request =
+              http.request(
+                `${SERVER_URL}/api/access/invites`,
+                {
+                  method: 'POST',
+
+                  headers: {
+                    Authorization:
+                      `Bearer ${relayKey}`
+                  }
+                },
+                (response) => {
+
+                  let body = '';
+
+                  response.setEncoding(
+                    'utf8'
+                  );
+
+                  response.on(
+                    'data',
+                    (chunk) => {
+                      body += chunk;
+                    }
+                  );
+
+                  response.on(
+                    'end',
+                    () => {
+
+                      let data;
+
+                      try {
+
+                        data =
+                          JSON.parse(
+                            body || '{}'
+                          );
+
+                      } catch {
+
+                        reject(
+                          new Error(
+                            '后台返回了无效数据'
+                          )
+                        );
+
+                        return;
+
+                      }
+
+
+                      if (
+                        response.statusCode < 200 ||
+                        response.statusCode >= 300
+                      ) {
+
+                        reject(
+                          new Error(
+                            data.error ||
+                            `HTTP ${response.statusCode}`
+                          )
+                        );
+
+                        return;
+
+                      }
+
+
+                      resolve(
+                        data.invite
+                      );
+
+                    }
+                  );
+
+                }
+              );
+
+
+            request.on(
+              'error',
+              reject
+            );
+
+
+            request.end();
+
+          }
+        );
+
+      }
+    );
+
+
+    /*
+ * 读取已经授权的朋友设备。
+ *
+ * 管理员密钥只在 Main Process 使用，
+ * 不发送给 Renderer。
+ */
+    ipcMain.handle(
+      'desktop:get-access-clients',
+      async () => {
+
+        const relayKey =
+          String(
+            process.env
+              .GAMA_MUSIC_RELAY_KEY ||
+            ''
+          ).trim();
+
+        if (!relayKey) {
+          throw new Error(
+            '后台管理员密钥不可用'
+          );
+        }
+
+
+        return new Promise(
+          (resolve, reject) => {
+
+            const request =
+              http.request(
+                `${SERVER_URL}/api/access/clients`,
+                {
+                  method: 'GET',
+
+                  headers: {
+                    Authorization:
+                      `Bearer ${relayKey}`
+                  }
+                },
+                (response) => {
+
+                  let body = '';
+
+                  response.setEncoding(
+                    'utf8'
+                  );
+
+                  response.on(
+                    'data',
+                    (chunk) => {
+                      body += chunk;
+                    }
+                  );
+
+                  response.on(
+                    'end',
+                    () => {
+
+                      let data;
+
+                      try {
+
+                        data =
+                          JSON.parse(
+                            body || '{}'
+                          );
+
+                      } catch {
+
+                        reject(
+                          new Error(
+                            '后台返回了无效数据'
+                          )
+                        );
+
+                        return;
+
+                      }
+
+
+                      if (
+                        response.statusCode < 200 ||
+                        response.statusCode >= 300
+                      ) {
+
+                        reject(
+                          new Error(
+                            data.error ||
+                            `HTTP ${response.statusCode}`
+                          )
+                        );
+
+                        return;
+
+                      }
+
+
+                      resolve(
+                        Array.isArray(
+                          data.clients
+                        )
+                          ? data.clients
+                          : []
+                      );
+
+                    }
+                  );
+
+                }
+              );
+
+
+            request.on(
+              'error',
+              reject
+            );
+
+
+            request.end();
+
+          }
+        );
+
+      }
+    );
+
+    /*
+ * 撤销某个朋友设备的授权。
+ *
+ * 管理员密钥只在 Main Process 使用。
+ */
+    ipcMain.handle(
+      'desktop:revoke-access-client',
+      async (
+        event,
+        clientId
+      ) => {
+
+        const relayKey =
+          String(
+            process.env
+              .GAMA_MUSIC_RELAY_KEY ||
+            ''
+          ).trim();
+
+        if (!relayKey) {
+          throw new Error(
+            '后台管理员密钥不可用'
+          );
+        }
+
+
+        const normalizedClientId =
+          String(
+            clientId || ''
+          ).trim();
+
+        if (!normalizedClientId) {
+          throw new Error(
+            '设备 ID 无效'
+          );
+        }
+
+
+        return new Promise(
+          (resolve, reject) => {
+
+            const request =
+              http.request(
+                `${SERVER_URL}/api/access/clients/${encodeURIComponent(
+                  normalizedClientId
+                )}/revoke`,
+                {
+                  method: 'POST',
+
+                  headers: {
+                    Authorization:
+                      `Bearer ${relayKey}`
+                  }
+                },
+                (response) => {
+
+                  let body = '';
+
+                  response.setEncoding(
+                    'utf8'
+                  );
+
+                  response.on(
+                    'data',
+                    (chunk) => {
+                      body += chunk;
+                    }
+                  );
+
+                  response.on(
+                    'end',
+                    () => {
+
+                      let data;
+
+                      try {
+
+                        data =
+                          JSON.parse(
+                            body || '{}'
+                          );
+
+                      } catch {
+
+                        reject(
+                          new Error(
+                            '后台返回了无效数据'
+                          )
+                        );
+
+                        return;
+
+                      }
+
+
+                      if (
+                        response.statusCode < 200 ||
+                        response.statusCode >= 300
+                      ) {
+
+                        reject(
+                          new Error(
+                            data.error ||
+                            `HTTP ${response.statusCode}`
+                          )
+                        );
+
+                        return;
+
+                      }
+
+
+                      resolve(
+                        data.client
+                      );
+
+                    }
+                  );
+
+                }
+              );
+
+
+            request.on(
+              'error',
+              reject
+            );
+
+
+            request.end();
+
+          }
+        );
+
+      }
+    );
 
     /*
      * Finder 打开数据目录。

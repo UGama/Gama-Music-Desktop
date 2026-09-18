@@ -30,6 +30,21 @@ const TRANSFER_DIR =
     'transfer'
   );
 
+/*
+* 已授权朋友设备。
+*
+* 这里永久保存设备授权，
+* Desktop 重启后仍然有效。
+*
+* 文件里只保存 Token 的哈希，
+* 不保存真正的 Token。
+*/
+const ACCESS_CLIENTS_PATH =
+  path.join(
+    STORAGE_DIR,
+    'access-clients.json'
+  );
+
 const PORT = Number(process.env.PORT || 7330);
 const HOST = process.env.HOST || '0.0.0.0';
 const YTDLP_BIN = process.env.GAMA_MUSIC_YTDLP || 'yt-dlp';
@@ -66,14 +81,28 @@ const favoriteJobs = new Map();
 const syncSessions =
   new Map();
 
-
+/*
+ * 临时朋友邀请码。
+ *
+ * 只保存在内存里：
+ * - 15 分钟过期
+ * - 使用一次后删除
+ * - Desktop 重启后全部失效
+ */
+const accessInvites =
+  new Map();
 /*
  * 一个同步二维码最多有效 15 分钟。
  */
 const SYNC_SESSION_MAX_AGE_MS =
   15 * 60 * 1000;
 
-
+/*
+ * 朋友连接邀请：
+ * 15 分钟内有效。
+ */
+const ACCESS_INVITE_MAX_AGE_MS =
+  15 * 60 * 1000;
 /*
  * B站收藏夹同时最多处理 3 首。
  *
@@ -410,15 +439,63 @@ function updateMissingSyncStatus(
   }
 
 
-  if (
-    session.preparation
-      ?.status === 'partial'
-  ) {
+  const preparationFinished =
+    [
+      'complete',
+      'partial'
+    ].includes(
+      session.preparation
+        ?.status
+    );
+
+
+  const bilibiliAudioTrackIds =
+    Array.isArray(
+      session.plan
+        ?.bilibiliAudioTrackIds
+    )
+      ? session.plan
+        .bilibiliAudioTrackIds
+      : [];
+
+
+  const bilibiliCoverTrackIds =
+    Array.isArray(
+      session.plan
+        ?.bilibiliCoverTrackIds
+    )
+      ? session.plan
+        .bilibiliCoverTrackIds
+      : [];
+
+
+  const needsBilibiliFallback =
+    preparationFinished &&
+    (
+      bilibiliAudioTrackIds.some(
+        (trackId) =>
+          !session.files?.[
+            String(trackId)
+          ]?.audio
+      ) ||
+
+      bilibiliCoverTrackIds.some(
+        (trackId) =>
+          !session.files?.[
+            String(trackId)
+          ]?.cover
+      )
+    );
+
+
+  if (needsBilibiliFallback) {
 
     /*
-     * Bilibili 下载失败以后，
-     * 先等 Computer Web
-     * 用自己保存的 MP3 / 封面兜底。
+     * Bilibili 已经准备结束，
+     * 但仍有 MP3 或封面缺失。
+     *
+     * 等 Computer Web
+     * 只上传缺失的那一部分。
      */
     session.status =
       'waiting-web-fallback';
@@ -645,6 +722,208 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+/*
+ * 生成容易手动输入的邀请码。
+ *
+ * 去掉容易混淆的：
+ * I / O / 0 / 1
+ */
+function createInviteCode() {
+
+  const alphabet =
+    'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+  let value = '';
+
+  for (
+    let index = 0;
+    index < 12;
+    index += 1
+  ) {
+
+    value +=
+      alphabet[
+      crypto.randomInt(
+        alphabet.length
+      )
+      ];
+
+  }
+
+
+  return [
+    value.slice(0, 4),
+    value.slice(4, 8),
+    value.slice(8, 12)
+  ].join('-');
+
+}
+
+
+/*
+ * 清理已经过期的邀请码。
+ */
+function cleanupExpiredAccessInvites() {
+
+  const now =
+    Date.now();
+
+
+  for (
+    const [
+      code,
+      invite
+    ]
+    of accessInvites
+  ) {
+
+    if (
+      invite.expiresAtMs <=
+      now
+    ) {
+
+      accessInvites.delete(
+        code
+      );
+
+    }
+
+  }
+
+}
+
+/*
+ * 从磁盘读取已经授权的朋友设备。
+ */
+function loadAccessClients() {
+
+  try {
+
+    if (
+      !fs.existsSync(
+        ACCESS_CLIENTS_PATH
+      )
+    ) {
+      return [];
+    }
+
+
+    const parsed =
+      JSON.parse(
+        fs.readFileSync(
+          ACCESS_CLIENTS_PATH,
+          'utf8'
+        )
+      );
+
+
+    if (
+      !Array.isArray(
+        parsed?.clients
+      )
+    ) {
+      return [];
+    }
+
+
+    return parsed.clients;
+
+  } catch (error) {
+
+    console.warn(
+      '读取朋友授权失败：',
+      error.message
+    );
+
+    return [];
+
+  }
+
+}
+
+
+/*
+ * 保存朋友设备授权。
+ *
+ * 先写临时文件，
+ * 再替换正式文件，
+ * 避免写到一半损坏 JSON。
+ */
+function saveAccessClients() {
+
+  const temporaryPath =
+    `${ACCESS_CLIENTS_PATH}.tmp`;
+
+
+  fs.writeFileSync(
+    temporaryPath,
+
+    JSON.stringify(
+      {
+        version: 1,
+        clients:
+          accessClients
+      },
+      null,
+      2
+    ),
+
+    'utf8'
+  );
+
+
+  fs.renameSync(
+    temporaryPath,
+    ACCESS_CLIENTS_PATH
+  );
+
+}
+
+
+/*
+ * 后台启动时加载一次。
+ */
+const accessClients =
+  loadAccessClients();
+/*
+ * 生成朋友设备的永久 Access Token。
+ *
+ * 真正的 Token 只在签发时返回一次，
+ * 不会保存到 access-clients.json。
+ */
+function createClientAccessToken() {
+
+  return (
+    'gma_client_' +
+    crypto
+      .randomBytes(32)
+      .toString('base64url')
+  );
+
+}
+
+
+/*
+ * 后台只保存 Token 的 SHA-256 哈希。
+ *
+ * 以后朋友访问后台时：
+ * 收到 Token
+ * → 计算哈希
+ * → 与 access-clients.json 比较
+ */
+function hashClientAccessToken(
+  token
+) {
+
+  return crypto
+    .createHash('sha256')
+    .update(
+      String(token || ''),
+      'utf8'
+    )
+    .digest('hex');
+
+}
 /*
  * Desktop 启动时先清理一次。
  */
@@ -2042,15 +2321,7 @@ async function prepareMissingBilibiliAudio(
       : 'complete';
 
 
-  const waitingForWeb =
-    Boolean(
-      session.plan
-        ?.localAudioTrackIds
-        ?.length ||
-      session.plan
-        ?.localCoverTrackIds
-        ?.length
-    );
+
 
 
   updateMissingSyncStatus(
@@ -2589,18 +2860,12 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function hasRelayAccess(
+/*
+ * 读取 Authorization 里的 Bearer Token。
+ */
+function getBearerToken(
   req
 ) {
-
-  /*
-   * 没有配置密码时，
-   * 保持现在的开发模式行为。
-   */
-  if (!RELAY_ACCESS_KEY) {
-    return true;
-  }
-
 
   const authorization =
     String(
@@ -2609,9 +2874,113 @@ function hasRelayAccess(
     ).trim();
 
 
+  const match =
+    authorization.match(
+      /^Bearer\s+(.+)$/i
+    );
+
+
   return (
-    authorization ===
-    `Bearer ${RELAY_ACCESS_KEY}`
+    match?.[1] || ''
+  ).trim();
+
+}
+
+
+/*
+ * 管理员权限：
+ * 只有后台主密码拥有。
+ */
+function hasAdminAccess(
+  req
+) {
+
+  /*
+   * 没配置主密码时，
+   * 保持原来的本地开发模式。
+   */
+  if (!RELAY_ACCESS_KEY) {
+    return true;
+  }
+
+
+  return (
+    getBearerToken(req) ===
+    RELAY_ACCESS_KEY
+  );
+
+}
+
+
+/*
+ * 查找有效的朋友设备授权。
+ */
+function findAccessClient(
+  req
+) {
+
+  const token =
+    getBearerToken(req);
+
+
+  if (
+    !token ||
+    token === RELAY_ACCESS_KEY
+  ) {
+    return null;
+  }
+
+
+  const tokenHash =
+    hashClientAccessToken(
+      token
+    );
+
+
+  return (
+    accessClients.find(
+      (client) =>
+        client &&
+        !client.revokedAt &&
+        client.tokenHash ===
+        tokenHash
+    ) ||
+    null
+  );
+
+}
+
+
+/*
+ * 普通后台访问权限：
+ *
+ * - 管理员主密码
+ * - 未撤销的朋友 Access Token
+ *
+ * 都可以访问普通 Gama Music API。
+ */
+function hasRelayAccess(
+  req
+) {
+
+  if (!RELAY_ACCESS_KEY) {
+    return true;
+  }
+
+
+  if (
+    hasAdminAccess(
+      req
+    )
+  ) {
+    return true;
+  }
+
+
+  return Boolean(
+    findAccessClient(
+      req
+    )
   );
 
 }
@@ -2947,6 +3316,219 @@ async function handleApi(req, res, url) {
     });
     return;
   }
+
+  /*
+ * 用一次性邀请码兑换永久设备授权。
+ *
+ * 这是新设备第一次连接时唯一不需要
+ * 后台主密码的入口。
+ */
+  if (
+    req.method === 'POST' &&
+    url.pathname ===
+    '/api/access/redeem'
+  ) {
+
+    cleanupExpiredAccessInvites();
+
+
+    const body =
+      await readJsonBody(req);
+
+
+    /*
+     * 允许朋友输入：
+     *
+     * ABCD-EFGH-JKLM
+     * abcdefghjklm
+     * ABCD EFGH JKLM
+     *
+     * 最后统一转换成后台保存的格式。
+     */
+    const compactCode =
+      String(
+        body?.code || ''
+      )
+        .toUpperCase()
+        .replace(
+          /[^A-Z0-9]/g,
+          ''
+        );
+
+
+    if (
+      compactCode.length !== 12
+    ) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '邀请码无效或已过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const code =
+      [
+        compactCode.slice(0, 4),
+        compactCode.slice(4, 8),
+        compactCode.slice(8, 12)
+      ].join('-');
+
+
+    const invite =
+      accessInvites.get(
+        code
+      );
+
+
+    if (
+      !invite ||
+      invite.expiresAtMs <=
+      Date.now()
+    ) {
+
+      accessInvites.delete(
+        code
+      );
+
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '邀请码无效或已过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const accessToken =
+      createClientAccessToken();
+
+
+    const createdAt =
+      nowIso();
+
+
+    const name =
+      String(
+        body?.name ||
+        'Gama Music Web'
+      )
+        .trim()
+        .slice(0, 80) ||
+      'Gama Music Web';
+
+
+    const client = {
+
+      id:
+        `client_${crypto
+          .randomBytes(12)
+          .toString('hex')}`,
+
+      tokenHash:
+        hashClientAccessToken(
+          accessToken
+        ),
+
+      name,
+
+      createdAt,
+
+      lastUsedAt:
+        null,
+
+      revokedAt:
+        null
+
+    };
+
+
+    /*
+     * 必须先成功写入磁盘，
+     * 然后才销毁邀请码。
+     *
+     * 否则如果磁盘写入失败，
+     * 邀请码已经没了，
+     * 朋友却又拿不到有效授权。
+     */
+    accessClients.push(
+      client
+    );
+
+
+    try {
+
+      saveAccessClients();
+
+    } catch (error) {
+
+      accessClients.pop();
+
+
+      console.error(
+        '保存朋友授权失败：',
+        error
+      );
+
+
+      sendJson(
+        res,
+        500,
+        {
+          error:
+            '保存设备授权失败'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * 保存成功以后立即销毁。
+     * 所以一个邀请码只能兑换一次。
+     */
+    accessInvites.delete(
+      code
+    );
+
+
+    sendJson(
+      res,
+      201,
+      {
+        accessToken,
+
+        client: {
+          id:
+            client.id,
+
+          name:
+            client.name,
+
+          createdAt:
+            client.createdAt
+        }
+      }
+    );
+
+    return;
+
+  }
   /*
  * health 可以公开访问。
  *
@@ -2972,6 +3554,396 @@ async function handleApi(req, res, url) {
 
   }
 
+
+  /*
+ * 创建一次性朋友邀请码。
+ *
+ * 这个接口已经位于后台主密码鉴权之后，
+ * 普通朋友不能自己生成邀请码。
+ */
+  if (
+    req.method === 'POST' &&
+    url.pathname ===
+    '/api/access/invites'
+  ) {
+
+    /*
+ * 普通朋友虽然拥有后台使用权限，
+ * 但不能继续生成新的邀请码。
+ */
+    if (
+      !hasAdminAccess(
+        req
+      )
+    ) {
+
+      sendJson(
+        res,
+        403,
+        {
+          error:
+            '只有管理员可以生成邀请码'
+        }
+      );
+
+      return;
+
+    }
+    if (!RELAY_ACCESS_KEY) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '后台尚未设置访问密码'
+        }
+      );
+
+      return;
+
+    }
+
+
+    cleanupExpiredAccessInvites();
+
+
+    let code;
+
+    do {
+
+      code =
+        createInviteCode();
+
+    } while (
+      accessInvites.has(
+        code
+      )
+    );
+
+
+    const createdAtMs =
+      Date.now();
+
+    const expiresAtMs =
+      createdAtMs +
+      ACCESS_INVITE_MAX_AGE_MS;
+
+
+    accessInvites.set(
+      code,
+      {
+        code,
+
+        createdAtMs,
+
+        expiresAtMs
+      }
+    );
+
+
+    sendJson(
+      res,
+      201,
+      {
+        invite: {
+          code,
+
+          expiresAt:
+            new Date(
+              expiresAtMs
+            ).toISOString()
+        }
+      }
+    );
+
+    return;
+
+  }
+
+  /*
+   * 当前朋友设备主动退出授权。
+   *
+   * 使用自己的 Access Token 即可，
+   * 不需要管理员权限。
+   */
+  if (
+    req.method === 'POST' &&
+    url.pathname ===
+    '/api/access/revoke-self'
+  ) {
+
+    const client =
+      findAccessClient(
+        req
+      );
+
+
+    if (!client) {
+
+      sendJson(
+        res,
+        401,
+        {
+          error:
+            '当前设备授权无效'
+        }
+      );
+
+      return;
+
+    }
+
+
+    client.revokedAt =
+      nowIso();
+
+
+    try {
+
+      saveAccessClients();
+
+    } catch (error) {
+
+      client.revokedAt =
+        null;
+
+
+      console.error(
+        '保存设备退出授权失败：',
+        error
+      );
+
+
+      sendJson(
+        res,
+        500,
+        {
+          error:
+            '保存设备退出授权失败'
+        }
+      );
+
+      return;
+
+    }
+
+
+    sendJson(
+      res,
+      200,
+      {
+        ok: true
+      }
+    );
+
+    return;
+
+  }
+
+
+
+  /*
+ * 查看已经授权的朋友设备。
+ *
+ * 只有管理员可以查看。
+ * 不返回 tokenHash。
+ */
+
+  if (
+    req.method === 'GET' &&
+    url.pathname ===
+    '/api/access/clients'
+  ) {
+
+    if (
+      !hasAdminAccess(
+        req
+      )
+    ) {
+
+      sendJson(
+        res,
+        403,
+        {
+          error:
+            '只有管理员可以查看授权设备'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const clients =
+      accessClients.map(
+        (client) => ({
+          id:
+            client.id,
+
+          name:
+            client.name,
+
+          createdAt:
+            client.createdAt,
+
+          lastUsedAt:
+            client.lastUsedAt ||
+            null,
+
+          revokedAt:
+            client.revokedAt ||
+            null
+        })
+      );
+
+
+    sendJson(
+      res,
+      200,
+      {
+        clients
+      }
+    );
+
+    return;
+
+  }
+
+
+  /*
+ * 撤销某个朋友设备的授权。
+ *
+ * 只有管理员可以操作。
+ */
+  const revokeAccessClientMatch =
+    url.pathname.match(
+      /^\/api\/access\/clients\/([^/]+)\/revoke$/
+    );
+
+
+  if (
+    req.method === 'POST' &&
+    revokeAccessClientMatch
+  ) {
+
+    if (
+      !hasAdminAccess(
+        req
+      )
+    ) {
+
+      sendJson(
+        res,
+        403,
+        {
+          error:
+            '只有管理员可以撤销授权'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const clientId =
+      decodeURIComponent(
+        revokeAccessClientMatch[1]
+      );
+
+
+    const client =
+      accessClients.find(
+        (item) =>
+          item?.id === clientId
+      );
+
+
+    if (!client) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '没有找到这个授权设备'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * 已经撤销过的话直接返回成功，
+     * 保持接口幂等。
+     */
+    if (!client.revokedAt) {
+
+      client.revokedAt =
+        nowIso();
+
+
+      try {
+
+        saveAccessClients();
+
+      } catch (error) {
+
+        client.revokedAt =
+          null;
+
+        console.error(
+          '保存撤销授权失败：',
+          error
+        );
+
+
+        sendJson(
+          res,
+          500,
+          {
+            error:
+              '保存撤销授权失败'
+          }
+        );
+
+        return;
+
+      }
+
+    }
+
+
+    sendJson(
+      res,
+      200,
+      {
+        client: {
+          id:
+            client.id,
+
+          name:
+            client.name,
+
+          revokedAt:
+            client.revokedAt
+        }
+      }
+    );
+
+    return;
+
+  }
+
+
+
+  /*
+ * 创建手机同步 Session。
+ */
   if (
     req.method === 'POST' &&
     url.pathname ===
@@ -2996,7 +3968,9 @@ async function handleApi(req, res, url) {
     const session = {
 
       id:
-        `sync_${crypto.randomBytes(16).toString('hex')}`,
+        `sync_${crypto
+          .randomBytes(16)
+          .toString('hex')}`,
 
       status:
         'waiting',
@@ -3012,6 +3986,7 @@ async function handleApi(req, res, url) {
 
       files:
         {},
+
       claimedByClientId:
         null,
 
@@ -3071,6 +4046,7 @@ async function handleApi(req, res, url) {
     return;
 
   }
+
 
   const syncTrackAudioMatch =
     url.pathname.match(
@@ -3925,6 +4901,30 @@ async function handleApi(req, res, url) {
 
     }
 
+    /*
+ * 已经完成的同步不能重新打开。
+ *
+ * 防止旧二维码再次 POST /missing
+ * 把 completed session 重新激活。
+ */
+    if (
+      session.status ===
+      'completed'
+    ) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '这个同步已经完成，请在电脑上重新生成二维码'
+        }
+      );
+
+      return;
+
+    }
+
 
     if (!session.manifest) {
 
@@ -4324,72 +5324,6 @@ async function handleApi(req, res, url) {
 
     if (!session) {
 
-      /*
- * Bilibili 下载失败的歌曲，
- * 下一步交给 Computer Web
- * 从 IndexedDB 上传兜底。
- */
-      const failedTrackIds =
-        new Set(
-          (
-            Array.isArray(
-              session.preparation
-                ?.failures
-            )
-              ? session.preparation
-                .failures
-              : []
-          )
-            .map(
-              (item) =>
-                String(
-                  item?.trackId || ''
-                )
-            )
-            .filter(Boolean)
-        );
-
-
-      const bilibiliAudioTrackIds =
-        Array.isArray(
-          session.plan
-            ?.bilibiliAudioTrackIds
-        )
-          ? session.plan
-            .bilibiliAudioTrackIds
-          : [];
-
-
-      const bilibiliCoverTrackIds =
-        Array.isArray(
-          session.plan
-            ?.bilibiliCoverTrackIds
-        )
-          ? session.plan
-            .bilibiliCoverTrackIds
-          : [];
-
-
-      const fallbackAudioTrackIds =
-        bilibiliAudioTrackIds
-          .map(String)
-          .filter(
-            (trackId) =>
-              failedTrackIds.has(
-                trackId
-              )
-          );
-
-
-      const fallbackCoverTrackIds =
-        bilibiliCoverTrackIds
-          .map(String)
-          .filter(
-            (trackId) =>
-              failedTrackIds.has(
-                trackId
-              )
-          );
       sendJson(
         res,
         404,
@@ -4403,6 +5337,68 @@ async function handleApi(req, res, url) {
 
     }
 
+
+    /*
+  * Bilibili 后台准备结束以后，
+  * 分别检查 MP3 和封面。
+  *
+  * 哪一种资源没有准备成功，
+  * Computer Web 就只兜底哪一种。
+  */
+    const preparationFinished =
+      [
+        'complete',
+        'partial'
+      ].includes(
+        session.preparation
+          ?.status
+      );
+
+
+    const bilibiliAudioTrackIds =
+      Array.isArray(
+        session.plan
+          ?.bilibiliAudioTrackIds
+      )
+        ? session.plan
+          .bilibiliAudioTrackIds
+        : [];
+
+
+    const bilibiliCoverTrackIds =
+      Array.isArray(
+        session.plan
+          ?.bilibiliCoverTrackIds
+      )
+        ? session.plan
+          .bilibiliCoverTrackIds
+        : [];
+
+
+    const fallbackAudioTrackIds =
+      preparationFinished
+        ? bilibiliAudioTrackIds
+          .map(String)
+          .filter(
+            (trackId) =>
+              !session.files?.[
+                trackId
+              ]?.audio
+          )
+        : [];
+
+
+    const fallbackCoverTrackIds =
+      preparationFinished
+        ? bilibiliCoverTrackIds
+          .map(String)
+          .filter(
+            (trackId) =>
+              !session.files?.[
+                trackId
+              ]?.cover
+          )
+        : [];
 
     sendJson(
       res,
@@ -4425,22 +5421,25 @@ async function handleApi(req, res, url) {
             bilibiliAudioTrackIds: [],
             localAudioTrackIds: [],
             bilibiliCoverTrackIds: [],
-            localCoverTrackIds: [],
-            fallback: {
-              audioTrackIds:
-                fallbackAudioTrackIds,
+            localCoverTrackIds: []
+          },
 
-              coverTrackIds:
-                fallbackCoverTrackIds
-            }
-          }
+        fallback: {
+          audioTrackIds:
+            fallbackAudioTrackIds,
+
+          coverTrackIds:
+            fallbackCoverTrackIds
+        }
       }
     );
 
 
     return;
-
   }
+
+
+
 
   const syncCompleteMatch =
     url.pathname.match(

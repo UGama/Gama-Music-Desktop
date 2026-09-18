@@ -16,6 +16,25 @@ contextBridge.exposeInMainWorld(
       );
     },
 
+    createAccessInvite() {
+      return ipcRenderer.invoke(
+        'desktop:create-access-invite'
+      );
+    },
+
+
+    getAccessClients() {
+      return ipcRenderer.invoke(
+        'desktop:get-access-clients'
+      );
+    },
+
+    revokeAccessClient(clientId) {
+      return ipcRenderer.invoke(
+        'desktop:revoke-access-client',
+        clientId
+      );
+    },
 
     openDataFolder() {
       return ipcRenderer.invoke(

@@ -85,6 +85,58 @@
         <section class="card">
 
             <div class="card-heading">
+                朋友访问
+            </div>
+
+            <p class="muted">
+                生成一次性邀请码。15 分钟内有效，只能使用一次。
+            </p>
+
+            <button id="createInviteButton" class="secondary-button">
+                生成邀请码
+            </button>
+
+            <div id="invitePanel" class="invite-panel" hidden>
+
+                <div class="invite-code-row">
+
+                    <code id="inviteCode" class="invite-code">
+                        —
+                    </code>
+
+                    <button id="copyInviteButton" class="secondary-button invite-copy-button" type="button">
+                        复制
+                    </button>
+
+                </div>
+
+                <div id="inviteExpiry" class="muted invite-expiry">
+                    15 分钟内有效，只能使用一次。
+                </div>
+
+            </div>
+
+            <div id="inviteError" class="invite-error" hidden></div>
+
+            <div class="access-clients">
+
+                <div class="access-clients-heading">
+                    已授权设备
+                </div>
+
+                <div id="accessClientsList" class="access-clients-list">
+                    <div class="muted">
+                        正在读取……
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+
+        <section class="card">
+
+            <div class="card-heading">
                 Server
             </div>
 
