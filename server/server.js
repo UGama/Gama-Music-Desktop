@@ -1464,7 +1464,153 @@ function downloadCoverImage(
   });
 }
 
-function execYtDlpJson(videoUrl) {
+function favoriteVideoReadableTitle(
+  value,
+  videoId
+) {
+
+  const title =
+    String(
+      value || ''
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+
+
+  const id =
+    String(
+      videoId || ''
+    ).trim();
+
+
+  if (!title) {
+
+    return null;
+
+  }
+
+
+  if (
+    id &&
+    title.toLowerCase() ===
+    id.toLowerCase()
+  ) {
+
+    return null;
+
+  }
+
+
+  if (
+    /^BV[0-9A-Za-z]+$/i.test(
+      title
+    )
+  ) {
+
+    return null;
+
+  }
+
+
+  return title.slice(
+    0,
+    160
+  );
+
+}
+
+
+async function probeFavoriteFailure(
+  video,
+  originalError
+) {
+
+  let title =
+    favoriteVideoReadableTitle(
+      video?.title,
+      video?.id
+    );
+
+
+  let error =
+    String(
+      originalError ||
+      '未知错误'
+    );
+
+
+  /*
+   * 收藏夹列表已经给了正常标题，
+   * 就不额外请求一次。
+   */
+  if (title) {
+
+    return {
+      title,
+      error
+    };
+
+  }
+
+
+  try {
+
+    const info =
+      await execYtDlpJson(
+        video.url,
+        30000
+      );
+
+
+    title =
+      favoriteVideoReadableTitle(
+        info?.title ||
+        info?.fulltitle,
+        video?.id
+      );
+
+
+  } catch (probeError) {
+
+    /*
+     * 第二次检查经常能返回
+     * 比下载阶段更明确的错误，
+     * 例如“视频已经失效”。
+     */
+    const probeMessage =
+      String(
+        probeError?.message || ''
+      ).trim();
+
+
+    if (probeMessage) {
+
+      error =
+        probeMessage;
+
+    }
+
+  }
+
+
+  console.warn(
+    `[Bilibili 收藏夹] 失败项复查：` +
+    `${title || video?.id || '未知视频'} · ` +
+    `${error}`
+  );
+
+
+  return {
+    title,
+    error
+  };
+
+}
+
+function execYtDlpJson(
+  videoUrl,
+  timeoutMs = 120000
+) {
   return new Promise((resolve, reject) => {
     const args = [
       '--dump-single-json',
@@ -1475,7 +1621,7 @@ function execYtDlpJson(videoUrl) {
     addCookieArgs(args);
     args.push(videoUrl);
 
-    execFile(YTDLP_BIN, args, { maxBuffer: 30 * 1024 * 1024, timeout: 120000 }, (error, stdout, stderr) => {
+    execFile(YTDLP_BIN, args, { maxBuffer: 30 * 1024 * 1024, timeout: timeoutMs }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(formatToolError('读取视频信息失败', error, stderr)));
         return;
@@ -1547,9 +1693,11 @@ function execYtDlpPlaylistJson(playlistUrl) {
                 key: identity.key,
                 url: identity.canonicalUrl,
                 title: cleanTitle(
-                  entry.title,
-                  identity.id
-                )
+                  entry.title ||
+                  entry.fulltitle ||
+                  '',
+                  ''
+                ) || null
               };
             })
             .filter(Boolean);
@@ -2926,7 +3074,14 @@ async function runFavoriteImportJob(
             `${video.title || video.id || '未知视频'} · ` +
             `${childJob.error || '未知错误'}`
           );
+          const checkedFailure =
+            await probeFavoriteFailure(
+              video,
+              childJob.error ||
+              '未知错误'
+            );
           job.failures.push({
+
             id:
               video.id,
 
@@ -2934,11 +3089,11 @@ async function runFavoriteImportJob(
               video.url,
 
             title:
-              video.title,
+              checkedFailure.title,
 
             error:
-              childJob.error ||
-              '未知错误'
+              checkedFailure.error
+
           });
 
         }
@@ -2957,7 +3112,15 @@ async function runFavoriteImportJob(
           `${error.message || '未知错误'}`
         );
 
+        const checkedFailure =
+          await probeFavoriteFailure(
+            video,
+            error.message ||
+            '未知错误'
+          );
+
         job.failures.push({
+
           id:
             video.id,
 
@@ -2965,11 +3128,11 @@ async function runFavoriteImportJob(
             video.url,
 
           title:
-            video.title,
+            checkedFailure.title,
 
           error:
-            error.message ||
-            '未知错误'
+            checkedFailure.error
+
         });
 
       } finally {
