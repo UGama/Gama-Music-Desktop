@@ -6332,6 +6332,194 @@ async function handleApi(req, res, url) {
     return;
   }
 
+
+  /*
+ * 只重试某个收藏夹任务里失败的歌曲。
+ */
+  const retryFavoriteJobMatch =
+    url.pathname.match(
+      /^\/api\/favorites\/jobs\/([^/]+)\/retry-failures$/
+    );
+
+
+  if (
+    req.method === 'POST' &&
+    retryFavoriteJobMatch
+  ) {
+
+    const originalJobId =
+      decodeURIComponent(
+        retryFavoriteJobMatch[1]
+      );
+
+
+    const originalJob =
+      favoriteJobs.get(
+        originalJobId
+      );
+
+
+    if (!originalJob) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '没有找到这个收藏夹导入任务'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const failures =
+      Array.isArray(
+        originalJob.failures
+      )
+        ? originalJob.failures
+        : [];
+
+
+    if (!failures.length) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '这个任务没有失败歌曲需要重试'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const body =
+      await readJsonBody(req);
+
+
+    const existingTracks =
+      Array.isArray(
+        body.existingTracks
+      )
+        ? body.existingTracks
+          .filter(
+            (track) =>
+              track?.id
+          )
+        : [];
+
+
+    const retryVideos =
+      failures
+        .filter(
+          (failure) =>
+            failure?.url
+        )
+        .map(
+          (failure) => ({
+            id:
+              failure.id,
+
+            url:
+              failure.url,
+
+            title:
+              failure.title
+          })
+        );
+
+
+    const retryJob = {
+
+      id:
+        makeId('fav'),
+
+      status:
+        'queued',
+
+      stage:
+        '准备重试失败歌曲',
+
+      playlistName:
+        originalJob.playlistName,
+
+      favoriteKey:
+        originalJob.favoriteKey,
+
+      trackIds:
+        [],
+
+      tracks:
+        [],
+
+      total:
+        retryVideos.length,
+
+      processed:
+        0,
+
+      downloaded:
+        0,
+
+      duplicates:
+        0,
+
+      failed:
+        0,
+
+      currentIndex:
+        0,
+
+      currentVideo:
+        null,
+
+      failures:
+        [],
+
+      createdAt:
+        nowIso(),
+
+      updatedAt:
+        nowIso()
+
+    };
+
+
+    favoriteJobs.set(
+      retryJob.id,
+      retryJob
+    );
+
+
+    runFavoriteImportJob(
+      retryJob,
+      retryVideos,
+      existingTracks
+    );
+
+
+    sendJson(
+      res,
+      202,
+      {
+        job:
+          publicFavoriteJob(
+            retryJob
+          )
+      }
+    );
+
+
+    return;
+
+  }
+
   const favoriteJobMatch =
     url.pathname.match(/^\/api\/favorites\/jobs\/([^/]+)$/);
 
