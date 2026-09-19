@@ -238,6 +238,23 @@ async function refreshAccessClients() {
                     : `授权于 ${createdAt.toLocaleString()}`;
 
 
+            const lastUsedAt =
+                client.lastUsedAt
+                    ? new Date(
+                        client.lastUsedAt
+                    )
+                    : null;
+
+
+            const lastUsedText =
+                lastUsedAt &&
+                    !Number.isNaN(
+                        lastUsedAt.getTime()
+                    )
+                    ? `最近使用 ${lastUsedAt.toLocaleString()}`
+                    : '尚未使用';
+
+
             const ipText =
                 client.ipAddress
                     ? `连接 IP: ${client.ipAddress}`
@@ -245,7 +262,7 @@ async function refreshAccessClients() {
 
 
             meta.textContent =
-                `${ipText} · ${authorizedText}`;
+                `${ipText} · ${authorizedText} · ${lastUsedText}`;
 
 
             const info =

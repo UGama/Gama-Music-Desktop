@@ -3152,6 +3152,63 @@ function hasAdminAccess(
 
 }
 
+/*
+ * 记录朋友设备最近访问后台的时间。
+ *
+ * 下载时可能会频繁轮询，
+ * 所以最多每 60 秒写一次磁盘。
+ */
+function touchAccessClient(
+  client
+) {
+
+  if (!client) {
+    return;
+  }
+
+
+  const now =
+    Date.now();
+
+
+  const previous =
+    Date.parse(
+      client.lastUsedAt ||
+      ''
+    );
+
+
+  if (
+    Number.isFinite(previous) &&
+    now - previous <
+    60 * 1000
+  ) {
+
+    return;
+
+  }
+
+
+  client.lastUsedAt =
+    new Date(now)
+      .toISOString();
+
+
+  try {
+
+    saveAccessClients();
+
+  } catch (error) {
+
+    console.warn(
+      '更新设备最近使用时间失败：',
+      error.message
+    );
+
+  }
+
+}
+
 
 /*
  * 查找有效的朋友设备授权。
@@ -3178,16 +3235,27 @@ function findAccessClient(
     );
 
 
-  return (
+  const client =
     accessClients.find(
-      (client) =>
-        client &&
-        !client.revokedAt &&
-        client.tokenHash ===
+      (item) =>
+        item &&
+        !item.revokedAt &&
+        item.tokenHash ===
         tokenHash
     ) ||
-    null
-  );
+    null;
+
+
+  if (client) {
+
+    touchAccessClient(
+      client
+    );
+
+  }
+
+
+  return client;
 
 }
 
