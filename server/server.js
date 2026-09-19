@@ -2921,6 +2921,11 @@ async function runFavoriteImportJob(
           job.failed += 1;
 
 
+          console.warn(
+            `[Bilibili 收藏夹] 导入失败：` +
+            `${video.title || video.id || '未知视频'} · ` +
+            `${childJob.error || '未知错误'}`
+          );
           job.failures.push({
             id:
               video.id,
@@ -2946,6 +2951,11 @@ async function runFavoriteImportJob(
          */
         job.failed += 1;
 
+        console.warn(
+          `[Bilibili 收藏夹] 导入失败：` +
+          `${video.title || video.id || '未知视频'} · ` +
+          `${error.message || '未知错误'}`
+        );
 
         job.failures.push({
           id:
