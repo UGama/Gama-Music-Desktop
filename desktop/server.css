@@ -133,8 +133,7 @@ body {
 }
 
 
-.card,
-.status-card {
+.card {
     margin-bottom: 12px;
 
     padding: 16px;
@@ -150,22 +149,19 @@ body {
         0 3px 12px rgba(30, 42, 70, 0.045);
 }
 
-.status-card {
-    padding:
-        14px 16px;
-}
-
 .service-grid {
     display: grid;
     grid-template-columns:
         repeat(2, minmax(0, 1fr));
 
-    gap: 14px;
+    gap: 12px;
+
+    margin-bottom: 12px;
 }
 
 
 .service-grid .card {
-    margin-bottom: 14px;
+    margin-bottom: 0;
 }
 
 
@@ -173,7 +169,8 @@ body {
 
     .service-grid {
         grid-template-columns: 1fr;
-        gap: 0;
+
+        gap: 12px;
     }
 
 }
@@ -217,24 +214,7 @@ body {
     white-space: nowrap;
 }
 
-.status-line {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-}
 
-
-.status-line strong {
-    display: block;
-
-    font-size: 14px;
-    line-height: 1.3;
-}
-
-
-.status-line .muted {
-    margin-top: 3px;
-}
 
 
 .status-dot {
@@ -283,7 +263,7 @@ body {
     align-items: center;
     justify-content: space-between;
 
-    gap: 16px;
+    gap: 10px;
 
     padding:
         9px 0;
@@ -298,6 +278,26 @@ body {
     border-bottom: 0;
 }
 
+.info-row>span {
+    flex:
+        0 0 auto;
+
+    white-space: nowrap;
+}
+
+
+.info-row code {
+    min-width: 0;
+
+    overflow-wrap: normal;
+    word-break: normal;
+
+    white-space: nowrap;
+
+    font-size: 12px;
+
+    text-align: right;
+}
 
 code {
     overflow-wrap: anywhere;
@@ -467,9 +467,11 @@ button {
         width: 100%;
     }
 
+
     .web-card-row {
         align-items: stretch;
         flex-direction: column;
+
         gap: 10px;
     }
 
@@ -487,6 +489,24 @@ button {
 
     #openDataButton {
         width: 100%;
+    }
+
+
+    .access-card-header {
+        align-items: stretch;
+        flex-direction: column;
+
+        gap: 10px;
+    }
+
+
+    .access-create-button {
+        width: 100%;
+    }
+
+
+    .invite-code {
+        font-size: 17px;
     }
 
 }
@@ -627,8 +647,8 @@ button {
     display: grid;
     place-items: center;
 
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
 
     margin: 0;
     padding: 0;
@@ -643,7 +663,7 @@ button {
     background:
         rgba(33, 134, 84, 0.08);
 
-    font-size: 22px;
+    font-size: 19px;
     font-weight: 700;
     line-height: 1;
 }
@@ -688,14 +708,20 @@ button {
     margin-top: 0;
 
     padding:
-        7px 11px;
+        6px 9px;
 
     border:
         1px solid #e2bcbc;
 
+    border-radius: 7px;
+
     color: #b13b3b;
 
     background: #fff8f8;
+
+    font-size: 12px;
+
+    white-space: nowrap;
 }
 
 
@@ -857,34 +883,16 @@ button {
     color: #3d4658;
 }
 
-@media (max-width: 560px) {
 
-    .access-card-header {
-        align-items: stretch;
-        flex-direction: column;
-
-        gap: 10px;
-    }
-
-
-    .access-create-button {
-        width: 100%;
-    }
-
-
-    .invite-code {
-        font-size: 17px;
-    }
-
-}
 
 footer {
     padding:
-        5px 8px;
+        8px 8px 2px;
 
-    color: #7a8393;
+    color: #9299a8;
 
     text-align: center;
 
-    font-size: 12px;
+    font-size: 11px;
+    line-height: 1.5;
 }

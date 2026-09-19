@@ -184,9 +184,35 @@ async function refreshAccessClients() {
             name.className =
                 'access-client-name';
 
-            name.textContent =
+            const deviceName =
                 client.name ||
+                [
+                    client.browser,
+                    client.platform
+                ]
+                    .filter(Boolean)
+                    .join(' · ') ||
                 '未命名设备';
+
+
+            const deviceCode =
+                client.id
+                    ? String(
+                        client.id
+                    )
+                        .slice(-4)
+                        .toUpperCase()
+                    : '';
+
+
+            const deviceLabel =
+                deviceCode
+                    ? `${deviceName} · ${deviceCode}`
+                    : deviceName;
+
+
+            name.textContent =
+                deviceLabel;
 
 
             const meta =
@@ -204,12 +230,22 @@ async function refreshAccessClients() {
                 );
 
 
-            meta.textContent =
+            const authorizedText =
                 Number.isNaN(
                     createdAt.getTime()
                 )
                     ? '已授权'
                     : `授权于 ${createdAt.toLocaleString()}`;
+
+
+            const ipText =
+                client.ipAddress
+                    ? `连接 IP: ${client.ipAddress}`
+                    : '连接 IP: 未知';
+
+
+            meta.textContent =
+                `${ipText} · ${authorizedText}`;
 
 
             const info =
@@ -247,7 +283,7 @@ async function refreshAccessClients() {
 
                     const confirmed =
                         window.confirm(
-                            `确定撤销「${client.name || '未命名设备'}」的授权吗？`
+                            `确定撤销「${deviceLabel}」的授权吗？`
                         );
 
                     if (!confirmed) {
@@ -895,8 +931,6 @@ async function init() {
 
                     await refreshServerLogs();
 
-    startServerLogsRefresh();
-
                 } finally {
 
                     button.disabled =
@@ -943,6 +977,8 @@ async function init() {
     startAccessClientsRefresh();
 
     await refreshServerLogs();
+
+    startServerLogsRefresh();
 }
 
 

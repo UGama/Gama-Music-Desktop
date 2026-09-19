@@ -723,6 +723,205 @@ function nowIso() {
 }
 
 /*
+ * 读取朋友连接时的 IP。
+ *
+ * Tailscale Funnel / 反向代理如果提供
+ * x-forwarded-for，就优先使用它。
+ *
+ * 这里只用于设备辨识，不参与权限判断。
+ */
+function getRequestIp(
+  req
+) {
+
+  const forwarded =
+    req.headers[
+    'x-forwarded-for'
+    ];
+
+
+  const forwardedValue =
+    Array.isArray(
+      forwarded
+    )
+      ? forwarded[0]
+      : forwarded;
+
+
+  let ip =
+    String(
+      forwardedValue ||
+      req.headers[
+      'x-real-ip'
+      ] ||
+      req.socket
+        ?.remoteAddress ||
+      ''
+    )
+      .split(',')[0]
+      .trim();
+
+
+  /*
+   * Node 有时会把 IPv4
+   * 表示成 ::ffff:1.2.3.4。
+   */
+  if (
+    ip.startsWith(
+      '::ffff:'
+    )
+  ) {
+
+    ip =
+      ip.slice(7);
+
+  }
+
+
+  if (ip === '::1') {
+    ip = '127.0.0.1';
+  }
+
+
+  return (
+    ip ||
+    '未知'
+  );
+
+}
+
+
+/*
+ * 从浏览器 User-Agent 做一个
+ * 简单的设备辨识。
+ *
+ * 不需要额外 npm 包。
+ */
+function getClientDeviceInfo(
+  req
+) {
+
+  const userAgent =
+    String(
+      req.headers[
+      'user-agent'
+      ] ||
+      ''
+    );
+
+
+  let browser =
+    'Web';
+
+
+  if (
+    /EdgA|EdgiOS|Edg\//i
+      .test(userAgent)
+  ) {
+
+    browser =
+      'Edge';
+
+  } else if (
+    /CriOS|Chrome\//i
+      .test(userAgent)
+  ) {
+
+    browser =
+      'Chrome';
+
+  } else if (
+    /FxiOS|Firefox\//i
+      .test(userAgent)
+  ) {
+
+    browser =
+      'Firefox';
+
+  } else if (
+    /OPR\//i
+      .test(userAgent)
+  ) {
+
+    browser =
+      'Opera';
+
+  } else if (
+    /Safari\//i
+      .test(userAgent)
+  ) {
+
+    browser =
+      'Safari';
+
+  }
+
+
+  let platform =
+    '未知设备';
+
+
+  if (
+    /iPhone/i
+      .test(userAgent)
+  ) {
+
+    platform =
+      'iPhone';
+
+  } else if (
+    /iPad/i
+      .test(userAgent)
+  ) {
+
+    platform =
+      'iPad';
+
+  } else if (
+    /Android/i
+      .test(userAgent)
+  ) {
+
+    platform =
+      'Android';
+
+  } else if (
+    /Windows NT/i
+      .test(userAgent)
+  ) {
+
+    platform =
+      'Windows';
+
+  } else if (
+    /Macintosh|Mac OS X/i
+      .test(userAgent)
+  ) {
+
+    platform =
+      'macOS';
+
+  } else if (
+    /Linux/i
+      .test(userAgent)
+  ) {
+
+    platform =
+      'Linux';
+
+  }
+
+
+  return {
+    browser,
+    platform,
+
+    label:
+      `${browser} · ${platform}`
+  };
+
+}
+/*
  * 生成容易手动输入的邀请码。
  *
  * 去掉容易混淆的：
@@ -1753,14 +1952,30 @@ function spawnDownload(job, args) {
 
 async function runDownloadJob(job) {
   try {
+
+    console.log(
+      `[Bilibili] 开始检查视频：${job.url}`
+    );
+
     job.status = 'checking';
     job.stage = '正在检查视频';
     job.progress = 3;
     job.updatedAt = nowIso();
 
     const info = await execYtDlpJson(job.url);
-    const summary = summarizeInfo(job.url, info);
-    job.preview = summary;
+    const summary =
+      summarizeInfo(
+        job.url,
+        info
+      );
+
+    job.preview =
+      summary;
+
+
+    console.log(
+      `[Bilibili] 视频信息读取完成：${summary.title}`
+    );
 
     const trackId = makeId('trk');
     const outputTemplate =
@@ -1797,7 +2012,21 @@ async function runDownloadJob(job) {
     addCookieArgs(args);
     args.push(job.url);
 
-    await spawnDownload(job, args);
+
+    console.log(
+      `[Bilibili] 开始下载音频：${summary.title}`
+    );
+
+
+    await spawnDownload(
+      job,
+      args
+    );
+
+
+    console.log(
+      `[Bilibili] 音频下载完成：${summary.title}`
+    );
 
     if (!fs.existsSync(finalPath)) {
       throw new Error('下载完成，但没有找到转换后的 MP3 文件。请检查 ffmpeg 是否可用。');
@@ -1897,7 +2126,19 @@ async function runDownloadJob(job) {
 
     job.updatedAt =
       nowIso();
+
+
+    console.log(
+      `[Bilibili] 导入完成：${track.title}`
+    );
+
   } catch (error) {
+
+    console.error(
+      `[Bilibili] 导入失败：${job.url}`,
+      error.message
+    );
+
     job.status = 'failed';
     job.stage = '下载失败';
     job.progress = 100;
@@ -3421,14 +3662,20 @@ async function handleApi(req, res, url) {
       nowIso();
 
 
+    const deviceInfo =
+      getClientDeviceInfo(
+        req
+      );
+
+
+    const ipAddress =
+      getRequestIp(
+        req
+      );
+
+
     const name =
-      String(
-        body?.name ||
-        'Gama Music Web'
-      )
-        .trim()
-        .slice(0, 80) ||
-      'Gama Music Web';
+      deviceInfo.label;
 
 
     const client = {
@@ -3444,6 +3691,14 @@ async function handleApi(req, res, url) {
         ),
 
       name,
+
+      browser:
+        deviceInfo.browser,
+
+      platform:
+        deviceInfo.platform,
+
+      ipAddress,
 
       createdAt,
 
@@ -3784,6 +4039,18 @@ async function handleApi(req, res, url) {
 
           name:
             client.name,
+
+          browser:
+            client.browser ||
+            null,
+
+          platform:
+            client.platform ||
+            null,
+
+          ipAddress:
+            client.ipAddress ||
+            null,
 
           createdAt:
             client.createdAt,
@@ -6083,8 +6350,21 @@ async function handleApi(req, res, url) {
       updatedAt: nowIso()
     };
     jobs.set(job.id, job);
+
+    console.log(
+      `[Bilibili] 收到导入请求：${videoUrl}`
+    );
+
     runDownloadJob(job);
-    sendJson(res, 202, { job: publicJob(job) });
+
+    sendJson(
+      res,
+      202,
+      {
+        job:
+          publicJob(job)
+      }
+    );
     return;
   }
 
