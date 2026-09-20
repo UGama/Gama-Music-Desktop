@@ -127,6 +127,25 @@ const TRANSFER_MAX_AGE_MS =
 const TRANSFER_CLEANUP_INTERVAL_MS =
   60 * 60 * 1000;
 
+/*
+* 手机流水线同步最多允许
+* 10 首已经准备好、但还没有
+* 被手机确认保存的歌曲。
+*/
+const SYNC_TRANSFER_BUFFER_LIMIT =
+  10;
+/*
+ * 手机流水线同步心跳。
+ *
+ * 手机每 10 秒报告一次在线状态。
+ * Desktop 超过 60 秒收不到心跳，
+ * 就认为手机/PWA 已经退出或被系统杀掉。
+ */
+const SYNC_HEARTBEAT_TIMEOUT_MS =
+  60 * 1000;
+
+const SYNC_HEARTBEAT_CHECK_INTERVAL_MS =
+  10 * 1000;
 fs.mkdirSync(
   TRANSFER_DIR,
   { recursive: true }
@@ -192,6 +211,31 @@ function publicSyncSession(
             entry?.cover
           )
       ).length,
+
+    pipelineMode:
+      session.pipelineMode ||
+      null,
+
+    bufferLimit:
+      SYNC_TRANSFER_BUFFER_LIMIT,
+
+    readyTrackIds:
+      getSyncReadyTrackIds(
+        session
+      ),
+
+    bufferedTrackCount:
+      getSyncReadyTrackIds(
+        session
+      ).length,
+
+    receivedTrackCount:
+      Array.isArray(
+        session.receivedTrackIds
+      )
+        ? session.receivedTrackIds.length
+        : 0,
+
     preparation:
       session.preparation
         ? {
@@ -297,6 +341,381 @@ function cleanupSyncSessionFiles(
   return removedCount;
 
 }
+function cleanupSyncTrackFiles(
+  session,
+  trackId
+) {
+
+  const id =
+    String(
+      trackId || ''
+    ).trim();
+
+
+  if (!id) {
+    return 0;
+  }
+
+
+  const entry =
+    session?.files?.[id];
+
+
+  if (!entry) {
+    return 0;
+  }
+
+
+  let removedCount =
+    0;
+
+
+  for (
+    const fileName
+    of [
+      entry.audio,
+      entry.cover
+    ]
+  ) {
+
+    if (!fileName) {
+      continue;
+    }
+
+
+    const filePath =
+      safeJoin(
+        TRANSFER_DIR,
+        `/${fileName}`
+      );
+
+
+    if (!filePath) {
+      continue;
+    }
+
+
+    try {
+
+      fs.rmSync(
+        filePath,
+        {
+          force: true
+        }
+      );
+
+
+      removedCount += 1;
+
+    } catch (error) {
+
+      console.warn(
+        `清理已接收同步文件失败 ${fileName}:`,
+        error.message
+      );
+
+    }
+
+  }
+
+
+  delete session.files[id];
+
+
+  return removedCount;
+
+}
+
+/*
+ * 清理一首正在下载或刚下载完成的
+ * yt-dlp 临时文件。
+ *
+ * 包括：
+ * .mp3
+ * .part
+ * 封面
+ * 以及同前缀的其他临时文件。
+ */
+function cleanupSyncDownloadJobFiles(
+  job
+) {
+
+  const trackId =
+    String(
+      job?.transferTrackId || ''
+    ).trim();
+
+
+  if (!trackId) {
+    return 0;
+  }
+
+
+  let removedCount = 0;
+
+
+  let entries = [];
+
+  try {
+
+    entries =
+      fs.readdirSync(
+        TRANSFER_DIR,
+        {
+          withFileTypes: true
+        }
+      );
+
+  } catch {
+
+    return 0;
+
+  }
+
+
+  for (const entry of entries) {
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+
+    if (
+      !entry.name.startsWith(
+        `${trackId}.`
+      ) &&
+      !entry.name.startsWith(
+        `${trackId}-cover.`
+      )
+    ) {
+
+      continue;
+
+    }
+
+
+    try {
+
+      fs.rmSync(
+        path.join(
+          TRANSFER_DIR,
+          entry.name
+        ),
+        {
+          force: true
+        }
+      );
+
+
+      removedCount += 1;
+
+    } catch (error) {
+
+      console.warn(
+        `清理取消同步临时文件失败 ${entry.name}:`,
+        error.message
+      );
+
+    }
+
+  }
+
+
+  return removedCount;
+
+}
+
+
+/*
+ * 真正取消一整个手机同步。
+ *
+ * 已经保存进手机 IndexedDB 的歌曲
+ * 不会受到影响。
+ *
+ * Desktop 这里只删除：
+ * - 尚未被手机保存的临时文件
+ * - 当前下载到一半的文件
+ */
+function cancelSyncSession(
+  session
+) {
+
+  if (!session) {
+    return 0;
+  }
+
+
+  session.cancelled =
+    true;
+
+  session.cancelledAt =
+    nowIso();
+
+
+  const currentJob =
+    session.currentSyncJob ||
+    null;
+
+
+  /*
+   * 立即终止当前 yt-dlp。
+   */
+  if (
+    currentJob?.childProcess &&
+    !currentJob.childProcess.killed
+  ) {
+
+    try {
+
+      currentJob
+        .childProcess
+        .kill('SIGTERM');
+
+    } catch (error) {
+
+      console.warn(
+        '停止同步下载进程失败：',
+        error.message
+      );
+
+    }
+
+  }
+
+
+  /*
+   * 删除已经准备好、
+   * 但手机还没接收的文件。
+   */
+  let removedCount =
+    cleanupSyncSessionFiles(
+      session
+    );
+
+
+  session.files = {};
+
+
+  /*
+   * 当前下载中的 .part 文件
+   * 等进程退出后再清理一次。
+   */
+  if (currentJob) {
+
+    const cleanupTimer =
+      setTimeout(
+        () => {
+
+          cleanupSyncDownloadJobFiles(
+            currentJob
+          );
+
+        },
+        500
+      );
+
+
+    cleanupTimer.unref?.();
+
+  }
+
+
+  if (session.preparation) {
+
+    session.preparation.status =
+      'cancelled';
+
+    session.preparation.updatedAt =
+      nowIso();
+
+  }
+
+
+  session.status =
+    'cancelled';
+
+
+  refreshSyncSessionExpiry(
+    session
+  );
+
+
+  return removedCount;
+
+}
+
+function cancelStaleSyncSessions() {
+
+  const now =
+    Date.now();
+
+
+  for (
+    const session
+    of syncSessions.values()
+  ) {
+
+    /*
+     * 只监控新版流水线同步。
+     * 旧同步和还没真正开始的二维码
+     * 不受影响。
+     */
+    if (
+      session.pipelineMode !==
+      'stream-v1' ||
+      !session.claimedByClientId ||
+      [
+        'completed',
+        'cancelled'
+      ].includes(
+        session.status
+      )
+    ) {
+
+      continue;
+
+    }
+
+
+    const lastHeartbeatAtMs =
+      Number(
+        session.lastHeartbeatAtMs ||
+        0
+      );
+
+
+    /*
+     * /missing 刚开始时就会初始化，
+     * 正常情况下不会走到这里。
+     */
+    if (!lastHeartbeatAtMs) {
+      continue;
+    }
+
+
+    if (
+      now -
+      lastHeartbeatAtMs <
+      SYNC_HEARTBEAT_TIMEOUT_MS
+    ) {
+
+      continue;
+
+    }
+
+
+    console.warn(
+      `手机同步心跳超时 ${session.id}，自动取消`
+    );
+
+
+    cancelSyncSession(
+      session
+    );
+
+  }
+
+}
 
 function updateSyncSessionStatus(
   session
@@ -359,6 +778,196 @@ function updateSyncSessionStatus(
 
 }
 
+function getSyncReceivedTrackSet(
+  session
+) {
+
+  return new Set(
+    Array.isArray(
+      session?.receivedTrackIds
+    )
+      ? session.receivedTrackIds
+        .map(String)
+      : []
+  );
+
+}
+
+
+function getSyncMissingTrackIds(
+  session
+) {
+
+  const audioTrackIds =
+    Array.isArray(
+      session?.missing
+        ?.audioTrackIds
+    )
+      ? session.missing
+        .audioTrackIds
+      : [];
+
+
+  const coverTrackIds =
+    Array.isArray(
+      session?.missing
+        ?.coverTrackIds
+    )
+      ? session.missing
+        .coverTrackIds
+      : [];
+
+
+  return [
+    ...new Set([
+      ...audioTrackIds.map(String),
+      ...coverTrackIds.map(String)
+    ])
+  ];
+
+}
+
+
+function isSyncTrackReadyForPhone(
+  session,
+  trackId
+) {
+
+  const id =
+    String(trackId);
+
+
+  const received =
+    getSyncReceivedTrackSet(
+      session
+    );
+
+
+  if (received.has(id)) {
+    return false;
+  }
+
+
+  const audioTrackIds =
+    new Set(
+      Array.isArray(
+        session?.missing
+          ?.audioTrackIds
+      )
+        ? session.missing
+          .audioTrackIds
+          .map(String)
+        : []
+    );
+
+
+  const coverTrackIds =
+    new Set(
+      Array.isArray(
+        session?.missing
+          ?.coverTrackIds
+      )
+        ? session.missing
+          .coverTrackIds
+          .map(String)
+        : []
+    );
+
+
+  const needsAudio =
+    audioTrackIds.has(id);
+
+  const needsCover =
+    coverTrackIds.has(id);
+
+
+  if (
+    !needsAudio &&
+    !needsCover
+  ) {
+    return false;
+  }
+
+
+  const entry =
+    session?.files?.[id] ||
+    {};
+
+
+  return (
+    (!needsAudio || Boolean(entry.audio)) &&
+    (!needsCover || Boolean(entry.cover))
+  );
+
+}
+
+
+function getSyncReadyTrackIds(
+  session
+) {
+
+  return getSyncMissingTrackIds(
+    session
+  ).filter(
+    (trackId) =>
+      isSyncTrackReadyForPhone(
+        session,
+        trackId
+      )
+  );
+
+}
+
+
+async function waitForSyncBufferSpace(
+  session
+) {
+
+  /*
+   * 旧手机端暂时继续旧流程。
+   * 下一步手机端显式开启 stream-v1
+   * 以后才真正启用 10 首缓冲限制。
+   */
+  if (
+    session?.pipelineMode !==
+    'stream-v1'
+  ) {
+    return;
+  }
+
+
+  while (
+    !session.cancelled &&
+    getSyncReadyTrackIds(
+      session
+    ).length >=
+    SYNC_TRANSFER_BUFFER_LIMIT
+  ) {
+
+    session.status =
+      'buffer-full';
+
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          250
+        )
+    );
+
+  }
+
+
+  if (!session.cancelled) {
+
+    updateMissingSyncStatus(
+      session
+    );
+
+  }
+
+}
 
 function updateMissingSyncStatus(
   session
@@ -401,25 +1010,49 @@ function updateMissingSyncStatus(
       : [];
 
 
+  const receivedTrackIds =
+    getSyncReceivedTrackSet(
+      session
+    );
+
+
   const allAudioReady =
     audioTrackIds.every(
-      (trackId) =>
-        Boolean(
-          session.files?.[
-            String(trackId)
-          ]?.audio
-        )
+      (trackId) => {
+
+        const id =
+          String(trackId);
+
+
+        return (
+          receivedTrackIds.has(id) ||
+          Boolean(
+            session.files?.[id]
+              ?.audio
+          )
+        );
+
+      }
     );
 
 
   const allCoversReady =
     coverTrackIds.every(
-      (trackId) =>
-        Boolean(
-          session.files?.[
-            String(trackId)
-          ]?.cover
-        )
+      (trackId) => {
+
+        const id =
+          String(trackId);
+
+
+        return (
+          receivedTrackIds.has(id) ||
+          Boolean(
+            session.files?.[id]
+              ?.cover
+          )
+        );
+
+      }
     );
 
 
@@ -473,17 +1106,35 @@ function updateMissingSyncStatus(
     preparationFinished &&
     (
       bilibiliAudioTrackIds.some(
-        (trackId) =>
-          !session.files?.[
-            String(trackId)
-          ]?.audio
+        (trackId) => {
+
+          const id =
+            String(trackId);
+
+
+          return (
+            !receivedTrackIds.has(id) &&
+            !session.files?.[id]
+              ?.audio
+          );
+
+        }
       ) ||
 
       bilibiliCoverTrackIds.some(
-        (trackId) =>
-          !session.files?.[
-            String(trackId)
-          ]?.cover
+        (trackId) => {
+
+          const id =
+            String(trackId);
+
+
+          return (
+            !receivedTrackIds.has(id) &&
+            !session.files?.[id]
+              ?.cover
+          );
+
+        }
       )
     );
 
@@ -1147,7 +1798,14 @@ const syncSessionCleanupTimer =
     cleanupExpiredSyncSessions,
     60 * 1000
   );
+const syncHeartbeatTimer =
+  setInterval(
+    cancelStaleSyncSessions,
+    SYNC_HEARTBEAT_CHECK_INTERVAL_MS
+  );
 
+
+syncHeartbeatTimer.unref?.();
 
 syncSessionCleanupTimer.unref?.();
 /*
@@ -2062,6 +2720,16 @@ function spawnDownload(job, args) {
       }
     );
 
+
+    /*
+     * 保存真正的 yt-dlp 子进程。
+     * 手机取消同步时，
+     * Desktop 可以立即终止当前下载。
+     */
+    job.childProcess =
+      child;
+
+
     const collect = [];
 
     function handleOutput(buffer) {
@@ -2086,8 +2754,36 @@ function spawnDownload(job, args) {
     child.stdout.on('data', handleOutput);
     child.stderr.on('data', handleOutput);
 
-    child.on('error', reject);
+    child.on(
+      'error',
+      (error) => {
+
+        if (
+          job.childProcess === child
+        ) {
+
+          job.childProcess =
+            null;
+
+        }
+
+
+        reject(error);
+
+      }
+    );
+
+
     child.on('close', (code) => {
+
+      if (
+        job.childProcess === child
+      ) {
+
+        job.childProcess =
+          null;
+
+      }
       if (code === 0) {
         resolve();
         return;
@@ -2125,7 +2821,12 @@ async function runDownloadJob(job) {
       `[Bilibili] 视频信息读取完成：${summary.title}`
     );
 
-    const trackId = makeId('trk');
+    const trackId =
+      makeId('trk');
+
+
+    job.transferTrackId =
+      trackId;
     const outputTemplate =
       path.join(
         TRANSFER_DIR,
@@ -2463,6 +3164,25 @@ async function prepareMissingBilibiliAudio(
 
   for (const trackId of trackIds) {
 
+    if (session.cancelled) {
+      break;
+    }
+
+
+    await waitForSyncBufferSpace(
+      session
+    );
+
+
+    if (session.cancelled) {
+      break;
+    }
+
+
+    let job =
+      null;
+
+
     const track =
       manifestTracks.find(
         (item) =>
@@ -2502,7 +3222,7 @@ async function prepareMissingBilibiliAudio(
       );
 
 
-      const job = {
+      job = {
 
         id:
           makeId('sync-job'),
@@ -2531,9 +3251,25 @@ async function prepareMissingBilibiliAudio(
       };
 
 
+      session.currentSyncJob =
+        job;
       await runDownloadJob(
         job
       );
+
+
+      if (session.cancelled) {
+
+        cleanupSyncDownloadJobFiles(
+          job
+        );
+
+        session.currentSyncJob =
+          null;
+
+        break;
+
+      }
 
 
       if (
@@ -2655,7 +3391,36 @@ async function prepareMissingBilibiliAudio(
             job.track.cover
           );
 
+      } else if (job.track.cover) {
+
+        /*
+         * 手机并不缺这张封面，
+         * runDownloadJob 却顺手下载了，
+         * 直接删掉，避免 transfer 白白堆积。
+         */
+        const unusedCoverPath =
+          safeJoin(
+            TRANSFER_DIR,
+            `/${job.track.cover}`
+          );
+
+
+        if (unusedCoverPath) {
+
+          fs.rmSync(
+            unusedCoverPath,
+            {
+              force: true
+            }
+          );
+
+        }
+
       }
+
+
+      session.currentSyncJob =
+        null;
 
 
       session.preparation
@@ -2666,8 +3431,25 @@ async function prepareMissingBilibiliAudio(
         `手机缺失歌曲准备完成：${track.title}`
       );
 
-    } catch (error) {
 
+      updateMissingSyncStatus(
+        session
+      );
+
+    } catch (error) {
+      session.currentSyncJob =
+        null;
+
+
+      if (session.cancelled) {
+
+        cleanupSyncDownloadJobFiles(
+          job
+        );
+
+        break;
+
+      }
       session.preparation
         .failed += 1;
 
@@ -2703,6 +3485,17 @@ async function prepareMissingBilibiliAudio(
 
   }
 
+  if (session.cancelled) {
+
+    session.preparation.status =
+      'cancelled';
+
+    session.preparation.updatedAt =
+      nowIso();
+
+    return;
+
+  }
 
   session.preparation.status =
     session.preparation.failed
@@ -3517,6 +4310,13 @@ function isPublicSyncRead(
         .test(pathname) ||
 
       /^\/api\/sync\/sessions\/sync_[0-9a-f]{32}\/complete$/i
+        .test(pathname) ||
+
+      /^\/api\/sync\/sessions\/sync_[0-9a-f]{32}\/cancel$/i
+        .test(pathname) ||
+      /^\/api\/sync\/sessions\/sync_[0-9a-f]{32}\/heartbeat$/i
+        .test(pathname) ||
+      /^\/api\/sync\/sessions\/sync_[0-9a-f]{32}\/tracks\/[^/]+\/received$/i
         .test(pathname)
     )
   ) {
@@ -4898,10 +5698,9 @@ async function handleApi(req, res, url) {
     }
 
 
-    updateSyncSessionStatus(
+    updateMissingSyncStatus(
       session
     );
-
 
     refreshSyncSessionExpiry(
       session
@@ -5416,8 +6215,12 @@ async function handleApi(req, res, url) {
  * 把 completed session 重新激活。
  */
     if (
-      session.status ===
-      'completed'
+      [
+        'completed',
+        'cancelled'
+      ].includes(
+        session.status
+      )
     ) {
 
       sendJson(
@@ -5425,7 +6228,7 @@ async function handleApi(req, res, url) {
         409,
         {
           error:
-            '这个同步已经完成，请在电脑上重新生成二维码'
+            '这个同步已经结束，请在电脑上重新生成二维码'
         }
       );
 
@@ -5452,6 +6255,38 @@ async function handleApi(req, res, url) {
 
     const body =
       await readJsonBody(req);
+
+
+    if (
+      String(
+        body?.pipelineMode || ''
+      ).trim() === 'stream-v1'
+    ) {
+
+      session.pipelineMode =
+        'stream-v1';
+
+      session.lastHeartbeatAtMs =
+        Date.now();
+
+      session.lastHeartbeatAt =
+        nowIso();
+
+    }
+
+
+    if (
+      !Array.isArray(
+        session.receivedTrackIds
+      )
+    ) {
+
+      session.receivedTrackIds =
+        [];
+
+    }
+
+
     const clientId =
       String(
         body?.clientId || ''
@@ -5946,7 +6781,522 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  const syncHeartbeatMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)\/heartbeat$/
+    );
 
+
+  if (
+    req.method === 'POST' &&
+    syncHeartbeatMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncHeartbeatMatch[1]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (
+      [
+        'completed',
+        'cancelled'
+      ].includes(
+        session.status
+      )
+    ) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '这个同步已经结束'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const body =
+      await readJsonBody(req);
+
+
+    const clientId =
+      String(
+        body?.clientId || ''
+      ).trim();
+
+
+    if (
+      !clientId ||
+      session.claimedByClientId !==
+      clientId
+    ) {
+
+      sendJson(
+        res,
+        403,
+        {
+          error:
+            '无权更新这个同步会话'
+        }
+      );
+
+      return;
+
+    }
+
+
+    session.lastHeartbeatAtMs =
+      Date.now();
+
+    session.lastHeartbeatAt =
+      nowIso();
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+
+    sendJson(
+      res,
+      200,
+      {
+        ok: true
+      }
+    );
+
+
+    return;
+
+  }
+  const syncTrackReceivedMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)\/tracks\/([^/]+)\/received$/
+    );
+
+
+  if (
+    req.method === 'POST' &&
+    syncTrackReceivedMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncTrackReceivedMatch[1]
+      );
+
+
+    const trackId =
+      decodeURIComponent(
+        syncTrackReceivedMatch[2]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (
+      [
+        'completed',
+        'cancelled'
+      ].includes(
+        session.status
+      )
+    ) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '这个同步已经结束'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const body =
+      await readJsonBody(req);
+
+
+    const clientId =
+      String(
+        body?.clientId || ''
+      ).trim();
+
+
+    if (
+      !clientId ||
+      session.claimedByClientId !==
+      clientId
+    ) {
+
+      sendJson(
+        res,
+        403,
+        {
+          error:
+            '无权确认这个同步文件'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const validTrackIds =
+      new Set(
+        getSyncMissingTrackIds(
+          session
+        )
+      );
+
+
+    if (!validTrackIds.has(trackId)) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '这首歌不在手机缺失清单中'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const receivedTrackIds =
+      getSyncReceivedTrackSet(
+        session
+      );
+
+
+    /*
+     * ACK 可以安全重复发送。
+     */
+    if (receivedTrackIds.has(trackId)) {
+
+      sendJson(
+        res,
+        200,
+        {
+          ok: true,
+          alreadyReceived: true,
+          removedFiles: 0,
+          session:
+            publicSyncSession(
+              session
+            )
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (
+      !isSyncTrackReadyForPhone(
+        session,
+        trackId
+      )
+    ) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '这首歌还没有准备完成'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * 到这里代表手机已经完整写进
+     * IndexedDB。
+     *
+     * Desktop 可以安全删除临时 MP3 /
+     * 封面。
+     */
+    const removedFiles =
+      cleanupSyncTrackFiles(
+        session,
+        trackId
+      );
+
+
+    session.receivedTrackIds =
+      [
+        ...receivedTrackIds,
+        trackId
+      ];
+
+
+    updateMissingSyncStatus(
+      session
+    );
+
+
+    refreshSyncSessionExpiry(
+      session
+    );
+
+
+    console.log(
+      `手机已保存同步歌曲 ${trackId}，已清理 ${removedFiles} 个临时文件`
+    );
+
+
+    sendJson(
+      res,
+      200,
+      {
+        ok: true,
+        removedFiles,
+        session:
+          publicSyncSession(
+            session
+          )
+      }
+    );
+
+
+    return;
+
+  }
+
+  const syncCancelMatch =
+    url.pathname.match(
+      /^\/api\/sync\/sessions\/([^/]+)\/cancel$/
+    );
+
+
+  if (
+    req.method === 'POST' &&
+    syncCancelMatch
+  ) {
+
+    cleanupExpiredSyncSessions();
+
+
+    const sessionId =
+      decodeURIComponent(
+        syncCancelMatch[1]
+      );
+
+
+    const session =
+      syncSessions.get(
+        sessionId
+      );
+
+
+    if (!session) {
+
+      sendJson(
+        res,
+        404,
+        {
+          error:
+            '同步会话不存在或已经过期'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const body =
+      await readJsonBody(req);
+
+
+    const clientId =
+      String(
+        body?.clientId ||
+        url.searchParams.get(
+          'clientId'
+        ) ||
+        ''
+      ).trim();
+
+
+    if (!clientId) {
+
+      sendJson(
+        res,
+        400,
+        {
+          error:
+            '缺少手机同步身份'
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (
+      !session.claimedByClientId ||
+      session.claimedByClientId !==
+      clientId
+    ) {
+
+      sendJson(
+        res,
+        403,
+        {
+          error:
+            '无权取消这个同步会话'
+        }
+      );
+
+      return;
+
+    }
+
+
+    /*
+     * 重复取消也返回成功。
+     */
+    if (
+      session.status ===
+      'cancelled'
+    ) {
+
+      sendJson(
+        res,
+        200,
+        {
+          ok: true,
+          session:
+            publicSyncSession(
+              session
+            ),
+          removedFiles: 0
+        }
+      );
+
+      return;
+
+    }
+
+
+    if (
+      session.status ===
+      'completed'
+    ) {
+
+      sendJson(
+        res,
+        409,
+        {
+          error:
+            '这个同步已经完成'
+        }
+      );
+
+      return;
+
+    }
+
+
+    const removedFiles =
+      cancelSyncSession(
+        session
+      );
+
+
+    console.log(
+      `手机取消同步 ${session.id}，已清理 ${removedFiles} 个临时文件`
+    );
+
+
+    sendJson(
+      res,
+      200,
+      {
+        ok: true,
+
+        session:
+          publicSyncSession(
+            session
+          ),
+
+        removedFiles
+      }
+    );
+
+
+    return;
+
+  }
 
 
   const syncCompleteMatch =
