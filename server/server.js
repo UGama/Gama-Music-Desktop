@@ -3101,13 +3101,72 @@ async function prepareMissingBilibiliAudio(
    *
    * Set 防止同一首歌下载两次。
    */
-  const trackIds =
+  const requestedTrackIds =
     [
       ...new Set([
-        ...audioTrackIds,
-        ...coverTrackIds
+        ...audioTrackIds.map(String),
+        ...coverTrackIds.map(String)
       ])
     ];
+
+
+  const requestedTrackIdSet =
+    new Set(
+      requestedTrackIds
+    );
+
+
+  const manifestTrackIds =
+    (
+      Array.isArray(
+        session.manifest?.tracks
+      )
+        ? session.manifest.tracks
+        : []
+    )
+      .map(
+        (track) =>
+          String(
+            track?.id || ''
+          )
+      )
+      .filter(Boolean);
+
+
+  const manifestTrackIdSet =
+    new Set(
+      manifestTrackIds
+    );
+
+
+  /*
+   * 准备顺序必须和手机处理歌曲的
+   * manifest 顺序保持一致。
+   *
+   * 否则 10 首缓冲区可能被后面的歌曲占满，
+   * 手机却在等待前面另一首歌曲，
+   * 最终形成互相等待。
+   */
+  const trackIds = [
+    ...manifestTrackIds.filter(
+      (trackId) =>
+        requestedTrackIdSet.has(
+          trackId
+        )
+    ),
+
+    /*
+     * 理论上 missing 中的歌曲都应该存在于 manifest。
+     * 这里保留异常 ID，
+     * 让后面的原有错误处理仍然能够发现问题。
+     */
+    ...requestedTrackIds.filter(
+      (trackId) =>
+        !manifestTrackIdSet.has(
+          trackId
+        )
+    )
+  ];
 
 
   session.preparation = {
