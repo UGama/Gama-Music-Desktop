@@ -137,12 +137,12 @@ const SYNC_TRANSFER_BUFFER_LIMIT =
 /*
  * 手机流水线同步心跳。
  *
- * 手机每 10 秒报告一次在线状态。
- * Desktop 超过 60 秒收不到心跳，
- * 就认为手机/PWA 已经退出或被系统杀掉。
+ * 手机正常前台运行时每 10 秒报告一次在线状态。
+ * 如果整个同步会话有效期内都没有收到心跳，
+ * 才认为手机已经长时间离开并取消会话。
  */
 const SYNC_HEARTBEAT_TIMEOUT_MS =
-  60 * 1000;
+  SYNC_SESSION_MAX_AGE_MS;
 
 const SYNC_HEARTBEAT_CHECK_INTERVAL_MS =
   10 * 1000;
@@ -6598,6 +6598,66 @@ async function handleApi(req, res, url) {
         nowIso()
 
     };
+
+
+    /*
+     * 手机从后台恢复时，
+     * 旧的准备任务可能仍然在运行。
+     *
+     * 这时只更新手机当前真正缺少的内容，
+     * 不重置 preparation / plan，
+     * 也不再启动第二条 Bilibili 下载循环。
+     */
+    const preparationAlreadyRunning =
+      session.preparation
+        ?.status === 'running' &&
+      session.plan;
+
+
+    if (
+      preparationAlreadyRunning
+    ) {
+
+      updateMissingSyncStatus(
+        session
+      );
+
+
+      refreshSyncSessionExpiry(
+        session
+      );
+
+
+      sendJson(
+        res,
+        200,
+        {
+          session:
+            publicSyncSession(
+              session
+            ),
+
+          missing: {
+            audioTrackIds:
+              missingAudioTrackIds,
+
+            coverTrackIds:
+              missingCoverTrackIds
+          },
+
+          plan:
+            session.plan,
+
+          resumed:
+            true
+        }
+      );
+
+
+      return;
+
+    }
+
 
     session.plan =
       syncPlan;
